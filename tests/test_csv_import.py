@@ -45,10 +45,17 @@ def test_parse_smbc_sample_only_deposits():
 
 
 def test_parse_gmo_sample():
+    """GMOあおぞらネット銀行の「当社CSV」。"""
     r = csv_import.parse_bank((SAMPLES / "gmo_aozora_statement.csv").read_bytes(), "gmo")
-    assert len(r.rows) == 1
+    assert [(t.date, t.amount) for t in r.rows] == [("2026-10-10", 54340), ("2026-10-01", 12)]
     t = r.rows[0]
-    assert (t.date, t.amount, t.payer_kana, t.balance) == ("2026-10-10", 54340, "ABC(ド", 820340)
+    assert (t.payer_kana, t.balance) == ("ABC(ド", 820340)
+    assert r.skipped == 1  # 出金
+
+
+def test_gmo_wrong_format_hints_tousha_csv():
+    with pytest.raises(csv_import.CsvFormatError, match="当社CSV"):
+        csv_import.parse_bank("a,b,c\n1,2,3\n".encode(), "gmo")
 
 
 def test_bank_preamble_rows_and_wareki():

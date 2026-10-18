@@ -8,17 +8,24 @@
     <fieldset>
       <legend>種類</legend>
       {% for key, label in kinds.items() %}
-      <label class="radio"><input type="radio" name="kind" value="{{ key }}" required {% if loop.first %}checked{% endif %}> {{ label }}</label>
+      <label class="radio"><input type="radio" name="kind" value="{{ key }}" required {% if loop.first %}checked{% endif %}> {{ label }}{% if key == "gmo" %}（当社CSV）{% endif %}</label>
       {% endfor %}
     </fieldset>
     <input type="file" name="file" accept=".csv,text/csv" multiple required>
     <button type="submit" class="primary">取り込む</button>
   </form>
+  <div class="formats">
+    <h3>取り込む CSV</h3>
+    <dl>
+      <dt>INVOY</dt><dd>請求書一覧の CSV 出力をそのまま取り込みます。</dd>
+      <dt>三井住友銀行</dt><dd>{{ bank_formats.smbc }}</dd>
+      <dt>GMOあおぞらネット銀行</dt><dd><strong>必ず「当社CSV」を選んでダウンロードしてください。</strong></dd>
+    </dl>
+  </div>
   <ul class="muted small">
-    <li>文字コードは Shift_JIS / UTF-8 のどちらでも取り込めます。</li>
-    <li>INVOY: 請求書一覧の CSV をそのまま取り込めます。同じ請求書番号を再取込すると内容を更新します（確定済みの請求書は更新しません）。</li>
-    <li>銀行明細: 入金行のみ取り込みます。期間が重なる CSV を取り込んでも同じ明細は重複しません。複数ファイルをまとめて選択できます。</li>
-    <li>三井住友銀行: Web21 の入出金明細 CSV（全銀協フォーマット）をそのまま取り込めます。</li>
+    <li>文字コードは Shift_JIS / UTF-8 のどちらでも取り込めます。複数ファイルをまとめて選択できます。</li>
+    <li>INVOY: 同じ請求書番号を再取込すると内容を更新します（確定済みの請求書は更新しません）。</li>
+    <li>銀行明細: 入金行のみ取り込みます。期間が重なる CSV を取り込んでも同じ明細は重複しません。</li>
   </ul>
 </section>
 

@@ -98,6 +98,7 @@ def render(request: Request, name: str, user=None, status_code: int = 200, **ctx
         csrf=auth.csrf_token(request.session),
         flashes=request.session.pop("flash", []),
         bank_names=csv_import.BANKS,
+        bank_formats=csv_import.BANK_CSV_FORMATS,
         fee_tolerance=config.FEE_TOLERANCE,
     )
     return templates.TemplateResponse(request, name, ctx, status_code=status_code)

@@ -48,7 +48,7 @@ def test_full_flow(logged_in, db_path):
     c = logged_in
     assert "新規4件" in _upload(c, "invoy", "invoy_invoices.csv").text
     assert "新規2件" in _upload(c, "smbc", "smbc_statement.csv").text
-    assert "新規1件" in _upload(c, "gmo", "gmo_aozora_statement.csv").text
+    assert "新規2件" in _upload(c, "gmo", "gmo_aozora_statement.csv").text
     # 同じ明細の再取込は重複しない
     assert "新規0件" in _upload(c, "smbc", "smbc_statement.csv").text
 

@@ -55,6 +55,12 @@ BANKS = {
     "gmo": "GMOあおぞらネット銀行",
 }
 
+# 取込対象の CSV の種類（画面とエラーメッセージに表示する）
+BANK_CSV_FORMATS = {
+    "smbc": "Web21 の入出金明細 CSV（全銀協フォーマット）",
+    "gmo": "入出金明細の「当社CSV」",
+}
+
 # 先に書いたものほど優先。完全一致 → 部分一致の順に探す
 INVOICE_COLUMNS = {
     "invoice_no": ["請求書番号", "請求番号", "書類番号", "請求書No", "請求書NO", "No"],
@@ -304,7 +310,10 @@ def parse_bank(data: bytes, bank: str) -> ParseResult:
     rows = _read_rows(data)
     if _is_zengin(rows):
         return parse_zengin(data, bank)
-    header_idx, cols = _locate_header(rows, BANK_COLUMNS, ("date", "deposit", "description"))
+    try:
+        header_idx, cols = _locate_header(rows, BANK_COLUMNS, ("date", "deposit", "description"))
+    except CsvFormatError as e:
+        raise CsvFormatError(f"{e}。{BANKS[bank]}は{BANK_CSV_FORMATS[bank]}をダウンロードして取り込んでください") from e
     result = ParseResult()
     occurrences: dict[str, int] = {}
     for lineno, row in enumerate(rows[header_idx + 1:], start=header_idx + 2):
