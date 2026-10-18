@@ -242,7 +242,7 @@ def _register_routes(app: FastAPI) -> None:
     async def upload(
         request: Request,
         kind: str = Form(...),
-        file: UploadFile = File(...),
+        file: list[UploadFile] = File(...),
         csrf: str = Form(""),
     ):
         user = current_user(request)
@@ -250,32 +250,8 @@ def _register_routes(app: FastAPI) -> None:
         if kind not in IMPORT_KINDS:
             flash(request, "取込種別が不正です", "error")
             return redirect("/upload")
-        data = await file.read(MAX_UPLOAD_BYTES + 1)
-        if len(data) > MAX_UPLOAD_BYTES:
-            flash(request, "ファイルが大きすぎます（10MBまで）", "error")
-            return redirect("/upload")
-        try:
-            parsed = csv_import.parse_invoy(data) if kind == "invoy" else csv_import.parse_bank(data, kind)
-        except csv_import.CsvFormatError as e:
-            flash(request, f"{file.filename}: {e}", "error")
-            return redirect("/upload")
-
-        with db.transaction(request.app.state.db_path) as conn:
-            if kind == "invoy":
-                added, updated, skipped = import_invoices(conn, parsed)
-                msg = f"請求書 新規{added}件・更新{updated}件・確定済のためスキップ{skipped}件"
-            else:
-                added, skipped = import_transactions(conn, parsed)
-                msg = f"{IMPORT_KINDS[kind]} 入金 新規{added}件・取込済のためスキップ{skipped}件"
-            skipped += parsed.skipped
-            conn.execute(
-                "INSERT INTO imports (kind, filename, added, skipped, imported_by) VALUES (?, ?, ?, ?, ?)",
-                (kind, file.filename or "", added, skipped, user["id"]),
-            )
-            db.audit(conn, user["id"], "import", f"{kind} {file.filename}: {msg}")
-        flash(request, f"{file.filename}: {msg}（対象外の行 {parsed.skipped}件）", "success")
-        for w in parsed.warnings[:20]:
-            flash(request, w, "warn")
+        for f in file:
+            await _import_file(request, user, kind, f)
         return redirect("/upload")
 
     # --- 請求書詳細・消込 ---
@@ -288,11 +264,17 @@ def _register_routes(app: FastAPI) -> None:
             if view is None:
                 return render(request, "not_found.html", user, status_code=404)
             matched_tx = confirmed_by = None
+            group_invoices = []
             if view.match:
                 if view.match["transaction_id"]:
                     matched_tx = conn.execute(
                         "SELECT * FROM transactions WHERE id = ?", (view.match["transaction_id"],)
                     ).fetchone()
+                    group_invoices = conn.execute(
+                        "SELECT i.* FROM matches m JOIN invoices i ON i.id = m.invoice_id "
+                        "WHERE m.transaction_id = ? ORDER BY i.invoice_no",
+                        (view.match["transaction_id"],),
+                    ).fetchall()
                 confirmed_by = conn.execute(
                     "SELECT username FROM users WHERE id = ?", (view.match["confirmed_by"],)
                 ).fetchone()["username"]
@@ -305,6 +287,7 @@ def _register_routes(app: FastAPI) -> None:
         return render(
             request, "invoice.html", user,
             view=view, matched_tx=matched_tx, confirmed_by=confirmed_by, aliases=aliases,
+            group_invoices=group_invoices if len(group_invoices) > 1 else [],
             tx_q=tx_q, search_results=search_results,
         )
 
@@ -313,35 +296,45 @@ def _register_routes(app: FastAPI) -> None:
         request: Request,
         invoice_id: int,
         transaction_id: int = Form(...),
+        invoice_ids: list[int] = Form([]),
         note: str = Form(""),
         register_alias: str = Form(""),
         csrf: str = Form(""),
     ):
+        """入金を請求書に消し込む。invoice_ids を渡すとまとめ入金として複数の請求書を同時に確定する。"""
         user = current_user(request)
         require_csrf(request, csrf)
         url = f"/invoices/{invoice_id}"
+        ids = [invoice_id] + [i for i in dict.fromkeys(invoice_ids) if i != invoice_id]
         with db.transaction(request.app.state.db_path) as conn:
-            inv = conn.execute("SELECT * FROM invoices WHERE id = ?", (invoice_id,)).fetchone()
+            invs = [conn.execute("SELECT * FROM invoices WHERE id = ?", (i,)).fetchone() for i in ids]
             tx = conn.execute("SELECT * FROM transactions WHERE id = ?", (transaction_id,)).fetchone()
-            if not inv or not tx:
+            if not all(invs) or not tx:
                 flash(request, "請求書または入金明細が見つかりません", "error")
                 return redirect(url)
-            try:
+            already = conn.execute(
+                f"SELECT COUNT(*) FROM matches WHERE transaction_id = ? OR invoice_id IN ({','.join('?' * len(ids))})",
+                (transaction_id, *ids),
+            ).fetchone()[0]
+            if already:
+                flash(request, "この請求書または入金は既に消込済です", "error")
+                return redirect(url)
+            fee_diff = sum(i["amount"] for i in invs) - tx["amount"]
+            for n, inv in enumerate(invs):
+                # まとめ入金の差額（手数料）は先頭の請求書にだけ記録する
                 conn.execute(
                     "INSERT INTO matches (invoice_id, transaction_id, fee_diff, note, confirmed_by) "
                     "VALUES (?, ?, ?, ?, ?)",
-                    (invoice_id, transaction_id, inv["amount"] - tx["amount"], note.strip(), user["id"]),
+                    (inv["id"], transaction_id, fee_diff if n == 0 else 0, note.strip(), user["id"]),
                 )
-            except sqlite3.IntegrityError:
-                flash(request, "この請求書または入金は既に消込済です", "error")
-                return redirect(url)
             if register_alias and tx["payer_kana"]:
-                _add_alias(conn, inv["client_id"], tx["payer_kana"])
+                _add_alias(conn, invs[0]["client_id"], tx["payer_kana"])
             db.audit(
                 conn, user["id"], "confirm",
-                f"請求書 {inv['invoice_no']} ← 入金#{tx['id']} {tx['date']} {tx['amount']:,}円 {tx['payer_kana']}",
+                f"請求書 {' + '.join(i['invoice_no'] for i in invs)} ← 入金#{tx['id']} {tx['date']} "
+                f"{tx['amount']:,}円 {tx['payer_kana']}",
             )
-        flash(request, "入金済として確定しました", "success")
+        flash(request, f"入金済として確定しました（{len(invs)}件）" if len(invs) > 1 else "入金済として確定しました", "success")
         return redirect(url)
 
     @app.post("/invoices/{invoice_id}/confirm-manual")
@@ -373,11 +366,20 @@ def _register_routes(app: FastAPI) -> None:
         user = current_user(request)
         require_csrf(request, csrf)
         with db.transaction(request.app.state.db_path) as conn:
-            inv = conn.execute("SELECT * FROM invoices WHERE id = ?", (invoice_id,)).fetchone()
-            cur = conn.execute("DELETE FROM matches WHERE invoice_id = ?", (invoice_id,))
-            if inv and cur.rowcount:
-                db.audit(conn, user["id"], "unconfirm", f"請求書 {inv['invoice_no']}")
-        flash(request, "確定を取り消しました", "success")
+            match = conn.execute("SELECT * FROM matches WHERE invoice_id = ?", (invoice_id,)).fetchone()
+            if not match:
+                return redirect(f"/invoices/{invoice_id}")
+            # まとめ入金は同じ入金に紐づく請求書をまとめて取り消す
+            if match["transaction_id"]:
+                where, param = "m.transaction_id = ?", match["transaction_id"]
+            else:
+                where, param = "m.invoice_id = ?", invoice_id
+            nos = [r[0] for r in conn.execute(
+                f"SELECT i.invoice_no FROM matches m JOIN invoices i ON i.id = m.invoice_id WHERE {where}", (param,)
+            )]
+            conn.execute(f"DELETE FROM matches WHERE id IN (SELECT m.id FROM matches m WHERE {where})", (param,))
+            db.audit(conn, user["id"], "unconfirm", f"請求書 {' + '.join(nos)}")
+        flash(request, f"確定を取り消しました（{', '.join(nos)}）", "success")
         return redirect(f"/invoices/{invoice_id}")
 
     # --- 入金明細 ---
@@ -386,7 +388,7 @@ def _register_routes(app: FastAPI) -> None:
     def transactions(request: Request, filter: str = "open", q: str = ""):
         user = current_user(request)
         sql = (
-            "SELECT t.*, i.id AS invoice_id, i.invoice_no FROM transactions t "
+            "SELECT t.*, GROUP_CONCAT(i.id || ':' || i.invoice_no, ',') AS invoice_refs FROM transactions t "
             "LEFT JOIN matches m ON m.transaction_id = t.id LEFT JOIN invoices i ON i.id = m.invoice_id "
         )
         where, params = [], []
@@ -399,7 +401,7 @@ def _register_routes(app: FastAPI) -> None:
             params += [f"%{q}%", f"%{q}%", q.replace(",", "")]
         if where:
             sql += "WHERE " + " AND ".join(where) + " "
-        sql += "ORDER BY t.date DESC, t.id DESC LIMIT 500"
+        sql += "GROUP BY t.id ORDER BY t.date DESC, t.id DESC LIMIT 500"
         with _conn(request) as conn:
             rows = conn.execute(sql, params).fetchall()
         return render(request, "transactions.html", user, rows=rows, filter=filter, q=q)
@@ -533,6 +535,35 @@ def _register_routes(app: FastAPI) -> None:
             db.audit(conn, user["id"], "password_change")
         flash(request, "パスワードを変更しました", "success")
         return redirect("/users")
+
+
+async def _import_file(request: Request, user: sqlite3.Row, kind: str, file: UploadFile) -> None:
+    data = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(data) > MAX_UPLOAD_BYTES:
+        flash(request, f"{file.filename}: ファイルが大きすぎます（10MBまで）", "error")
+        return
+    try:
+        parsed = csv_import.parse_invoy(data) if kind == "invoy" else csv_import.parse_bank(data, kind)
+    except csv_import.CsvFormatError as e:
+        flash(request, f"{file.filename}: {e}", "error")
+        return
+
+    with db.transaction(request.app.state.db_path) as conn:
+        if kind == "invoy":
+            added, updated, skipped = import_invoices(conn, parsed)
+            msg = f"請求書 新規{added}件・更新{updated}件・確定済のためスキップ{skipped}件"
+        else:
+            added, skipped = import_transactions(conn, parsed)
+            msg = f"{IMPORT_KINDS[kind]} 入金 新規{added}件・取込済のためスキップ{skipped}件"
+        skipped += parsed.skipped
+        conn.execute(
+            "INSERT INTO imports (kind, filename, added, skipped, imported_by) VALUES (?, ?, ?, ?, ?)",
+            (kind, file.filename or "", added, skipped, user["id"]),
+        )
+        db.audit(conn, user["id"], "import", f"{kind} {file.filename}: {msg}")
+    flash(request, f"{file.filename}: {msg}（対象外の行 {parsed.skipped}件）", "success")
+    for w in parsed.warnings[:20]:
+        flash(request, f"{file.filename} {w}", "warn")
 
 
 def _add_alias(conn: sqlite3.Connection, client_id: int, alias: str) -> bool:

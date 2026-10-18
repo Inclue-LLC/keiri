@@ -57,16 +57,19 @@ CREATE TABLE IF NOT EXISTS transactions (
     imported_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
 
--- 人が確定した消込。transaction_id が NULL の場合は明細なしの手動入金済
+-- 人が確定した消込。transaction_id が NULL の場合は明細なしの手動入金済。
+-- まとめ入金では同じ transaction_id に複数の請求書が紐づく
 CREATE TABLE IF NOT EXISTS matches (
     id INTEGER PRIMARY KEY,
     invoice_id INTEGER NOT NULL UNIQUE REFERENCES invoices(id),
-    transaction_id INTEGER UNIQUE REFERENCES transactions(id),
+    transaction_id INTEGER REFERENCES transactions(id),
     fee_diff INTEGER NOT NULL DEFAULT 0,
     note TEXT NOT NULL DEFAULT '',
     confirmed_by INTEGER NOT NULL REFERENCES users(id),
     confirmed_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
+
+CREATE INDEX IF NOT EXISTS idx_matches_transaction ON matches (transaction_id);
 
 CREATE TABLE IF NOT EXISTS imports (
     id INTEGER PRIMARY KEY,
@@ -100,6 +103,7 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
 def init_db(path: Path | None = None) -> None:
     conn = connect(path)
     try:
+        _migrate_matches(conn)
         conn.executescript(SCHEMA)
         # 既存 DB への列追加
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(invoices)")}
@@ -108,6 +112,27 @@ def init_db(path: Path | None = None) -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+def _migrate_matches(conn: sqlite3.Connection) -> None:
+    """旧スキーマ（1入金=1請求書の UNIQUE 制約あり）の matches テーブルを作り直す。"""
+    row = conn.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'matches'").fetchone()
+    if not row or "transaction_id INTEGER UNIQUE" not in row["sql"]:
+        return
+    conn.executescript("""
+        ALTER TABLE matches RENAME TO matches_old;
+        CREATE TABLE matches (
+            id INTEGER PRIMARY KEY,
+            invoice_id INTEGER NOT NULL UNIQUE REFERENCES invoices(id),
+            transaction_id INTEGER REFERENCES transactions(id),
+            fee_diff INTEGER NOT NULL DEFAULT 0,
+            note TEXT NOT NULL DEFAULT '',
+            confirmed_by INTEGER NOT NULL REFERENCES users(id),
+            confirmed_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+        );
+        INSERT INTO matches SELECT * FROM matches_old;
+        DROP TABLE matches_old;
+    """)
 
 
 @contextmanager

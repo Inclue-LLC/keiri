@@ -139,3 +139,79 @@ def test_user_management(logged_in):
         data={"current_password": "correct-horse-battery", "new_password": "another-long-pw", "csrf": token},
     )
     assert "変更しました" in r.text
+
+
+def test_combined_confirm_and_unconfirm(logged_in, db_path):
+    with db.transaction(db_path) as conn:
+        conn.execute("INSERT INTO clients (id, name) VALUES (1, '株式会社サンプル')")
+        for no, amount in (("A", 440000), ("B", 165000)):
+            conn.execute(
+                "INSERT INTO invoices (invoice_no, client_id, issue_date, due_date, amount) "
+                "VALUES (?, 1, '2026-04-01', '2026-05-31', ?)",
+                (no, amount),
+            )
+        conn.execute(
+            "INSERT INTO transactions (bank, date, amount, description, payer_kana, dedupe_key) "
+            "VALUES ('smbc', '2026-05-29', 604560, '', 'カ)サンプル', 'k')"
+        )
+        a, b = [r[0] for r in conn.execute("SELECT id FROM invoices ORDER BY invoice_no")]
+    page = logged_in.get(f"/invoices/{a}").text
+    assert "まとめ入金の可能性" in page and "2件まとめて確定" in page
+
+    token = csrf_of(logged_in, f"/invoices/{a}")
+    r = logged_in.post(
+        f"/invoices/{a}/confirm",
+        data={"transaction_id": 1, "invoice_ids": [a, b], "register_alias": "1", "csrf": token},
+    )
+    assert "確定しました（2件）" in r.text
+    with db.transaction(db_path) as conn:
+        rows = conn.execute("SELECT invoice_id, fee_diff FROM matches ORDER BY invoice_id").fetchall()
+        assert [tuple(r) for r in rows] == [(a, 440), (b, 0)]
+    assert "まとめ入金" in logged_in.get(f"/invoices/{b}").text
+    tx_page = logged_in.get("/transactions?filter=matched").text
+    assert ">A</a> + <a" in tx_page
+
+    r = logged_in.post(f"/invoices/{b}/unconfirm", data={"csrf": token})
+    assert "確定を取り消しました（A, B）" in r.text
+    with db.transaction(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM matches").fetchone()[0] == 0
+
+
+def test_migrates_old_unique_matches_table(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "old.db"
+    old_schema = db.SCHEMA.replace(
+        "transaction_id INTEGER REFERENCES transactions(id),",
+        "transaction_id INTEGER UNIQUE REFERENCES transactions(id),",
+    ).replace("    memo TEXT NOT NULL DEFAULT '',\n", "")
+    conn = sqlite3.connect(path)
+    conn.executescript(old_schema)
+    conn.execute("INSERT INTO users (id, username, password_hash) VALUES (1, 'u', 'x')")
+    conn.execute("INSERT INTO clients (id, name) VALUES (1, 'c')")
+    conn.execute("INSERT INTO invoices (id, invoice_no, client_id, amount) VALUES (1, 'A', 1, 100), (2, 'B', 1, 100)")
+    conn.execute(
+        "INSERT INTO transactions (id, bank, date, amount, description, payer_kana, dedupe_key) "
+        "VALUES (1, 'smbc', '2026-01-01', 200, '', '', 'k')"
+    )
+    conn.execute("INSERT INTO matches (invoice_id, transaction_id, confirmed_by) VALUES (1, 1, 1)")
+    conn.commit()
+    conn.close()
+
+    db.init_db(path)
+    with db.transaction(path) as conn:
+        conn.execute("INSERT INTO matches (invoice_id, transaction_id, confirmed_by) VALUES (2, 1, 1)")
+        assert conn.execute("SELECT COUNT(*) FROM matches").fetchone()[0] == 2
+        assert "memo" in {r["name"] for r in conn.execute("PRAGMA table_info(invoices)")}
+
+
+def test_upload_multiple_files(logged_in):
+    token = csrf_of(logged_in, "/upload")
+    smbc = (SAMPLES / "smbc_statement.csv").read_bytes()
+    r = logged_in.post(
+        "/upload",
+        data={"kind": "smbc", "csrf": token},
+        files=[("file", ("a.csv", smbc, "text/csv")), ("file", ("b.csv", smbc, "text/csv"))],
+    )
+    assert "a.csv: 三井住友銀行 入金 新規2件" in r.text
+    assert "b.csv: 三井住友銀行 入金 新規0件・取込済のためスキップ2件" in r.text

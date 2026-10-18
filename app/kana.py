@@ -64,8 +64,9 @@ def normalize(name: str) -> str:
     s = "".join(chr(ord(c) + 0x60) if "ぁ" <= c <= "ゖ" else c for c in s)
     s = s.upper().translate(_SMALL_TO_LARGE)
     s = re.sub(r"[‐‑‒–—―−ｰ-]", "ー", s)
-    # 振込依頼人コード（先頭の数字列）を除去
-    s = re.sub(r"^\d{6,}\s*", "", s)
+    # 振込依頼人コード（先頭の数字列）や名義末尾の識別番号（「ｶ)ﾌｱﾝﾎﾞﾂｸｽ 0001」「ｶ)ﾏﾙｲ(0101」）を除去
+    s = re.sub(r"^(?:\d+\s+|\d{6,})", "", s.strip())
+    s = re.sub(r"[\s(]*\d{3,}\)?$", "", s)
     s = _ENTITY_RE.sub(" ", s.strip())
     s = _WORDS_RE.sub("", s)
     s = re.sub(r"[\s・.,，．、()（）「」\"'/]", "", s)

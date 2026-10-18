@@ -36,8 +36,11 @@
   {% else %}
   <p>入金明細なしで確定</p>
   {% endif %}
+  {% if group_invoices %}
+  <p>まとめ入金: {% for g in group_invoices %}{% if not loop.first %} + {% endif %}<a href="/invoices/{{ g.id }}">{{ g.invoice_no }}</a>（{{ g.amount|yen }}円）{% endfor %}</p>
+  {% endif %}
   <p class="muted">確定者: {{ confirmed_by }} ／ {{ view.match.confirmed_at }}{% if view.match.note %} ／ メモ: {{ view.match.note }}{% endif %}</p>
-  <form method="post" action="/invoices/{{ inv.id }}/unconfirm" onsubmit="return confirm('確定を取り消しますか？')">
+  <form method="post" action="/invoices/{{ inv.id }}/unconfirm" onsubmit="return confirm('{{ 'まとめ入金の請求書をすべて取り消します。よろしいですか？' if group_invoices else '確定を取り消しますか？' }}')">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <button type="submit" class="danger">確定を取り消す</button>
   </form>
@@ -46,7 +49,7 @@
 
 <section class="card">
   <h2>入金候補</h2>
-  <p class="muted small">金額が一致、または請求額より最大{{ fee_tolerance|yen }}円少ない未消込の入金のうち、振込名義か日付が合うものを表示しています。内容を確認して確定してください。</p>
+  <p class="muted small">金額が一致、または請求額より最大{{ fee_tolerance|yen }}円少ない未消込の入金のうち、振込名義か日付が合うものを表示しています。同じ取引先の複数の請求書の合計に一致する入金は「まとめ入金」として表示します。内容を確認して確定してください。</p>
   {% if not view.candidates %}
   <p class="empty">候補はありません。下の検索から入金を探すこともできます。</p>
   {% endif %}
@@ -55,18 +58,27 @@
   <form method="post" action="/invoices/{{ inv.id }}/confirm" class="candidate">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <input type="hidden" name="transaction_id" value="{{ t.id }}">
+    {% for g in c.group %}<input type="hidden" name="invoice_ids" value="{{ g.id }}">{% endfor %}
     <div class="cand-main">
       <div><strong>{{ t.date }}</strong> {{ bank_names[t.bank] }}</div>
       <div class="payer">{{ t.payer_kana }}</div>
       <div class="num strong">{{ t.amount|yen }}円</div>
     </div>
     <div class="cand-reasons">{{ reasons(c) }}</div>
+    {% if c.is_combined %}
+    <table class="group">
+      {% for g in c.group %}
+      <tr{% if g.id == inv.id %} class="current"{% endif %}><td><a href="/invoices/{{ g.id }}">{{ g.invoice_no }}</a></td><td class="clip">{{ g.subject }}</td><td>期限 {{ g.due_date or "—" }}</td><td class="num">{{ g.amount|yen }}円</td></tr>
+      {% endfor %}
+      <tr><td colspan="3" class="muted">合計</td><td class="num strong">{{ c.group|sum(attribute="amount")|yen }}円</td></tr>
+    </table>
+    {% endif %}
     <div class="cand-actions">
       {% if c.name_score < 0.85 %}
       <label class="small"><input type="checkbox" name="register_alias" value="1"> 「{{ t.payer_kana }}」を{{ inv.client_name }}の別名に登録</label>
       {% endif %}
       <input name="note" placeholder="メモ（任意）">
-      <button type="submit" class="primary">この入金で確定</button>
+      <button type="submit" class="primary">{{ c.group|length ~ "件まとめて確定" if c.is_combined else "この入金で確定" }}</button>
     </div>
   </form>
   {% endfor %}

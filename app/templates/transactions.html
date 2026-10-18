@@ -20,7 +20,7 @@
     <tr>
       <td>{{ t.date }}</td><td>{{ bank_names[t.bank] }}</td><td>{{ t.payer_kana }}</td>
       <td class="muted clip">{{ t.description }}</td><td class="num">{{ t.amount|yen }}</td>
-      <td>{% if t.invoice_id %}<a href="/invoices/{{ t.invoice_id }}">{{ t.invoice_no }}</a>{% else %}<span class="muted">未消込</span>{% endif %}</td>
+      <td>{% if t.invoice_refs %}{% for ref in t.invoice_refs.split(",") %}{% set id, no = ref.split(":", 1) %}{% if not loop.first %} + {% endif %}<a href="/invoices/{{ id }}">{{ no }}</a>{% endfor %}{% else %}<span class="muted">未消込</span>{% endif %}</td>
     </tr>
   {% endfor %}
   </tbody>

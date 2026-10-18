@@ -227,10 +227,83 @@ def parse_invoy(data: bytes) -> ParseResult:
     return result
 
 
+def _is_zengin(rows: list[list[str]]) -> bool:
+    """全銀協フォーマット（データ区分 1/2/8/9 のレコードが混在する形式）か。"""
+    return bool(rows) and bool(rows[0]) and _norm_header(rows[0][0]) == "データ区分"
+
+
+def parse_zengin_date(value: str) -> str:
+    """全銀フォーマットの勘定日（和暦 YYMMDD、令和）を ISO 形式にする。"""
+    s = value.strip()
+    if not re.fullmatch(r"\d{6}", s):
+        raise ValueError(f"日付を解釈できません: {value}")
+    return date(2018 + int(s[:2]), int(s[2:4]), int(s[4:6])).isoformat()
+
+
+def parse_zengin(data: bytes, bank: str) -> ParseResult:
+    """全銀協フォーマットの入出金取引明細 CSV（三井住友銀行 Web21 など）。
+
+    データ区分 1=ヘッダー（口座情報）、2=明細、8=トレーラー、9=エンド。
+    各レコードの直前に列名の行がある。明細のうち入払区分 1（入金）のみ取り込む。
+    """
+    rows = _read_rows(data)
+    result = ParseResult()
+    account = ""
+    header: list[str] = []
+    for lineno, row in enumerate(rows, start=1):
+        if not row or not row[0].strip():
+            continue
+        kind = row[0].strip()
+        if _norm_header(kind) == "データ区分":
+            header = [_norm_header(h) for h in row]
+            continue
+        rec = dict(zip(header, (c.strip() for c in row)))
+        if kind == "1":
+            account = f"{rec.get('支店コード', '')}-{rec.get('口座番号', '')}"
+            continue
+        if kind != "2":
+            continue
+        if rec.get("入払区分") != "1":
+            result.skipped += 1
+            continue
+        try:
+            d = parse_zengin_date(rec.get("勘定日", ""))
+            amount = parse_amount(rec.get("取引金額", ""))
+        except ValueError as e:
+            result.skipped += 1
+            result.warnings.append(f"{lineno}行目: {e}")
+            continue
+        if not amount or amount <= 0:
+            result.skipped += 1
+            continue
+        payer = unicodedata.normalize("NFKC", rec.get("振込依頼人名または契約者番号", ""))
+        summary = unicodedata.normalize("NFKC", rec.get("摘要内容", ""))
+        sender_bank = unicodedata.normalize(
+            "NFKC", " ".join(x for x in (rec.get("仕向銀行名", ""), rec.get("仕向支店名", "")) if x)
+        )
+        description = " ".join(x for x in (summary, payer, f"({sender_bank})" if sender_bank else "") if x)
+        # 照会番号は口座・勘定日ごとに一意なので、期間が重なる CSV を取り込んでも重複しない
+        key = hashlib.sha256(
+            f"zengin|{bank}|{account}|{d}|{rec.get('照会番号', '')}|{amount}".encode()
+        ).hexdigest()
+        result.rows.append(ParsedTransaction(
+            bank=bank,
+            date=d,
+            amount=amount,
+            description=description,
+            payer_kana=payer or kana.extract_payer(summary),
+            balance=None,
+            dedupe_key=key,
+        ))
+    return result
+
+
 def parse_bank(data: bytes, bank: str) -> ParseResult:
     if bank not in BANKS:
         raise CsvFormatError(f"未対応の銀行です: {bank}")
     rows = _read_rows(data)
+    if _is_zengin(rows):
+        return parse_zengin(data, bank)
     header_idx, cols = _locate_header(rows, BANK_COLUMNS, ("date", "deposit", "description"))
     result = ParseResult()
     occurrences: dict[str, int] = {}

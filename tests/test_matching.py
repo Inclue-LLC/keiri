@@ -101,3 +101,65 @@ def test_fee_over_tolerance_not_candidate(db_path):
             "VALUES ('smbc', '2026-10-10', 9000, '', 'サンプル', 'k1')"
         )
         assert _views(conn)["S-1"].candidates == []
+
+
+def _setup_client(conn, invoices, txs, alias="カ)サンプル"):
+    conn.execute("INSERT INTO clients (id, name) VALUES (1, '株式会社サンプル')")
+    conn.execute("INSERT INTO client_aliases (client_id, alias, alias_norm) VALUES (1, ?, 'サンプル')", (alias,))
+    for no, issue, due, amount in invoices:
+        conn.execute(
+            "INSERT INTO invoices (invoice_no, client_id, issue_date, due_date, amount) VALUES (?, 1, ?, ?, ?)",
+            (no, issue, due, amount),
+        )
+    for n, (d, amount, payer) in enumerate(txs):
+        conn.execute(
+            "INSERT INTO transactions (bank, date, amount, description, payer_kana, dedupe_key) "
+            "VALUES ('smbc', ?, ?, '', ?, ?)",
+            (d, amount, payer, f"k{n}"),
+        )
+
+
+def test_combined_payment_candidate(db_path):
+    with db.transaction(db_path) as conn:
+        _setup_client(
+            conn,
+            [("A", "2026-03-09", "2026-04-30", 440000), ("B", "2026-05-02", "2026-05-31", 165000),
+             ("C", "2026-05-10", "2026-06-30", 50000)],
+            [("2026-05-29", 605000, "カ)サンプル")],
+        )
+        views = _views(conn)
+    for no in ("A", "B"):
+        c = views[no].candidates[0]
+        assert c.is_combined
+        assert [g["invoice_no"] for g in c.group] == ["A", "B"]
+        assert c.amount_diff == 0
+        assert views[no].status == matching.STATUS_REVIEW
+    assert views["C"].candidates == []
+
+
+def test_combined_payment_requires_name(db_path):
+    with db.transaction(db_path) as conn:
+        _setup_client(
+            conn,
+            [("A", "2026-03-09", "2026-04-30", 440000), ("B", "2026-05-02", "2026-05-31", 165000)],
+            [("2026-05-29", 605000, "ベツノカイシヤ")],
+        )
+        assert _views(conn)["A"].candidates == []
+
+
+def test_same_amount_prefers_deposit_near_due(db_path):
+    with db.transaction(db_path) as conn:
+        _setup_client(
+            conn,
+            [("APR", "2026-04-08", "2026-04-30", 165000), ("MAY", "2026-05-02", "2026-05-31", 165000)],
+            [("2026-04-30", 165000, "カ)サンプル"), ("2026-05-29", 165000, "カ)サンプル")],
+        )
+        views = _views(conn)
+    assert views["APR"].candidates[0].transaction["date"] == "2026-04-30"
+    assert views["MAY"].candidates[0].transaction["date"] == "2026-05-29"
+
+
+def test_fee_candidate_requires_date(db_path):
+    with db.transaction(db_path) as conn:
+        _setup_client(conn, [("A", "2026-06-06", "2026-07-31", 34656)], [("2026-03-31", 34289, "カ)サンプル")])
+        assert _views(conn)["A"].candidates == []

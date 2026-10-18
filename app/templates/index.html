@@ -43,6 +43,7 @@
         {% elif v.candidates %}
           {% set c = v.candidates[0] %}
           <a href="/invoices/{{ v.invoice.id }}">{{ c.transaction.date }} {{ c.transaction.payer_kana }}</a>
+          {% if c.is_combined %}<span class="chip chip-warn">まとめ入金</span>{% endif %}
           {% if c.fee_suspected %}<span class="chip chip-warn">手数料差引の可能性あり</span>{% endif %}
           {% if v.candidates|length > 1 %}<span class="muted">他{{ v.candidates|length - 1 }}件</span>{% endif %}
         {% endif %}

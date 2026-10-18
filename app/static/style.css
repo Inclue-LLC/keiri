@@ -120,3 +120,6 @@ form.stack { display: grid; gap: 8px; max-width: 360px; }
   .topbar { gap: 8px; }
 }
 .memo { white-space: pre-wrap; }
+.group { width: auto; min-width: 60%; font-size: 13px; }
+.group td { padding: 4px 10px; }
+.group tr.current td { background: var(--review-bg); }
