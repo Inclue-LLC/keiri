@@ -33,7 +33,7 @@
       <td>{{ status_badge(v.status) }}</td>
       <td><a href="/invoices/{{ v.invoice.id }}">{{ v.invoice.invoice_no }}</a></td>
       <td>{{ v.invoice.client_name }}</td>
-      <td class="clip">{{ v.invoice.subject }}</td>
+      <td class="clip">{{ v.invoice.subject }}{% if v.invoice.memo %} <span class="chip chip-warn" title="{{ v.invoice.memo }}">備考あり</span>{% endif %}</td>
       <td>{{ v.invoice.issue_date or "" }}</td>
       <td>{{ v.invoice.due_date or "" }}</td>
       <td class="num">{{ v.invoice.amount|yen }}</td>

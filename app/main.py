@@ -129,16 +129,16 @@ def import_invoices(conn: sqlite3.Connection, parsed: csv_import.ParseResult) ->
         ).fetchone()
         if existing is None:
             conn.execute(
-                "INSERT INTO invoices (invoice_no, client_id, subject, issue_date, due_date, amount) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (inv.invoice_no, client["id"], inv.subject, inv.issue_date, inv.due_date, inv.amount),
+                "INSERT INTO invoices (invoice_no, client_id, subject, issue_date, due_date, amount, memo) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (inv.invoice_no, client["id"], inv.subject, inv.issue_date, inv.due_date, inv.amount, inv.memo),
             )
             added += 1
         elif existing["match_id"] is None:
             conn.execute(
-                "UPDATE invoices SET client_id = ?, subject = ?, issue_date = ?, due_date = ?, amount = ? "
+                "UPDATE invoices SET client_id = ?, subject = ?, issue_date = ?, due_date = ?, amount = ?, memo = ? "
                 "WHERE id = ?",
-                (client["id"], inv.subject, inv.issue_date, inv.due_date, inv.amount, existing["id"]),
+                (client["id"], inv.subject, inv.issue_date, inv.due_date, inv.amount, inv.memo, existing["id"]),
             )
             updated += 1
         else:

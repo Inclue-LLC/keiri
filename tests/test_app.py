@@ -56,11 +56,15 @@ def test_full_flow(logged_in, db_path):
     assert "要確認" in page and "期日超過" in page and "手数料差引の可能性あり" in page
 
     with db.transaction(db_path) as conn:
-        inv = conn.execute("SELECT * FROM invoices WHERE invoice_no = 'INV-2026-0101'").fetchone()
+        inv = conn.execute("SELECT * FROM invoices WHERE invoice_no = '20260901-1'").fetchone()
         tx = conn.execute("SELECT * FROM transactions WHERE amount = 110000").fetchone()
 
     detail = c.get(f"/invoices/{inv['id']}").text
     assert "この入金で確定" in detail
+
+    with db.transaction(db_path) as conn:
+        memo_inv = conn.execute("SELECT id FROM invoices WHERE invoice_no = '20261001-1'").fetchone()[0]
+    assert "11月分と合算して入金予定" in c.get(f"/invoices/{memo_inv}").text
 
     token = csrf_of(c, f"/invoices/{inv['id']}")
     r = c.post(
@@ -77,7 +81,7 @@ def test_full_flow(logged_in, db_path):
 
     # 消込済の入金を別の請求書に使うことはできない
     with db.transaction(db_path) as conn:
-        other = conn.execute("SELECT id FROM invoices WHERE invoice_no = 'INV-2026-0104'").fetchone()[0]
+        other = conn.execute("SELECT id FROM invoices WHERE invoice_no = '20261001-1'").fetchone()[0]
     r = c.post(f"/invoices/{other}/confirm", data={"transaction_id": tx["id"], "csrf": token})
     assert "既に消込済" in r.text
 
@@ -91,7 +95,7 @@ def test_full_flow(logged_in, db_path):
 def test_manual_confirm_requires_note(logged_in, db_path):
     _upload(logged_in, "invoy", "invoy_invoices.csv")
     with db.transaction(db_path) as conn:
-        inv = conn.execute("SELECT id FROM invoices WHERE invoice_no = 'INV-2026-0103'").fetchone()[0]
+        inv = conn.execute("SELECT id FROM invoices WHERE invoice_no = '20260820-1'").fetchone()[0]
     token = csrf_of(logged_in, f"/invoices/{inv}")
     r = logged_in.post(f"/invoices/{inv}/confirm-manual", data={"note": " ", "csrf": token})
     assert "理由" in r.text

@@ -6,13 +6,23 @@ from tests.conftest import SAMPLES
 
 def test_parse_invoy_sample():
     r = csv_import.parse_invoy((SAMPLES / "invoy_invoices.csv").read_bytes())
-    assert [i.invoice_no for i in r.rows] == [f"INV-2026-010{n}" for n in range(1, 5)]
-    assert r.skipped == 1  # 下書き
+    assert [i.invoice_no for i in r.rows] == ["20260901-1", "20260905-1", "20260820-1", "20261001-1"]
+    assert r.skipped == 0  # ステータスが「下書き」でも取り込む
     first = r.rows[0]
     assert first.client_name == "株式会社山田商事"
-    assert first.amount == 110000  # 小計・消費税ではなく合計金額
-    assert first.issue_date == "2026-09-01"
+    assert first.amount == 110000
+    assert first.issue_date == "2026-09-01"  # 請求日の列がないので請求書番号から
     assert first.due_date == "2026-09-30"
+    assert r.rows[3].subject == "10月分 コンサルティング（1, 2回目）"
+    assert r.rows[3].memo == "11月分と合算して入金予定"
+
+
+@pytest.mark.parametrize(
+    "invoice_no, expected",
+    [("20260105-1", "2026-01-05"), ("20260105", "2026-01-05"), ("20261340-1", None), ("INV-001", None)],
+)
+def test_issue_date_from_invoice_no(invoice_no, expected):
+    assert csv_import.issue_date_from_invoice_no(invoice_no) == expected
 
 
 def test_parse_invoy_line_items_dedup():

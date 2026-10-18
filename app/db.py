@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS invoices (
     issue_date TEXT,
     due_date TEXT,
     amount INTEGER NOT NULL,
+    memo TEXT NOT NULL DEFAULT '',
     imported_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
 
@@ -97,8 +98,16 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
 
 
 def init_db(path: Path | None = None) -> None:
-    with connect(path) as conn:
+    conn = connect(path)
+    try:
         conn.executescript(SCHEMA)
+        # 既存 DB への列追加
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(invoices)")}
+        if "memo" not in cols:
+            conn.execute("ALTER TABLE invoices ADD COLUMN memo TEXT NOT NULL DEFAULT ''")
+        conn.commit()
+    finally:
+        conn.close()
 
 
 @contextmanager

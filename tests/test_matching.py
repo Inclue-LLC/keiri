@@ -23,32 +23,32 @@ def test_statuses_from_samples(db_path):
         views = _views(conn)
 
     # 金額一致・日付妥当だが名義が未登録 → 要確認
-    v = views["INV-2026-0101"]
+    v = views["20260901-1"]
     assert v.status == matching.STATUS_REVIEW
     assert v.candidates[0].amount_diff == 0
     assert not v.candidates[0].fee_suspected
 
     # 660円少ない入金・名義一致 → 手数料差引の可能性ありで要確認
-    v = views["INV-2026-0102"]
+    v = views["20260905-1"]
     assert v.status == matching.STATUS_REVIEW
     assert v.candidates[0].fee_suspected
     assert v.candidates[0].amount_diff == 660
     assert any("手数料差引の可能性あり" in label for label, _ in v.candidates[0].reasons)
 
-    assert views["INV-2026-0103"].status == matching.STATUS_OVERDUE
-    assert views["INV-2026-0104"].status == matching.STATUS_UNPAID
+    assert views["20260820-1"].status == matching.STATUS_OVERDUE
+    assert views["20261001-1"].status == matching.STATUS_UNPAID
 
 
 def test_alias_raises_name_score(db_path):
     with db.transaction(db_path) as conn:
         _load_samples(conn)
         client_id = conn.execute("SELECT id FROM clients WHERE name = '株式会社山田商事'").fetchone()[0]
-        before = _views(conn)["INV-2026-0101"].candidates[0].score
+        before = _views(conn)["20260901-1"].candidates[0].score
         conn.execute(
             "INSERT INTO client_aliases (client_id, alias, alias_norm) VALUES (?, 'ｶ)ﾔﾏﾀﾞｼﾖｳｼﾞ', 'ヤマダシヨウジ')",
             (client_id,),
         )
-        cand = _views(conn)["INV-2026-0101"].candidates[0]
+        cand = _views(conn)["20260901-1"].candidates[0]
     assert cand.score > before
     assert cand.name_score == 1.0
 
@@ -57,7 +57,7 @@ def test_confirmed_match_is_paid_and_tx_not_reused(db_path):
     with db.transaction(db_path) as conn:
         _load_samples(conn)
         conn.execute("INSERT INTO users (username, password_hash) VALUES ('u', 'x')")
-        inv = conn.execute("SELECT id FROM invoices WHERE invoice_no = 'INV-2026-0101'").fetchone()[0]
+        inv = conn.execute("SELECT id FROM invoices WHERE invoice_no = '20260901-1'").fetchone()[0]
         tx = conn.execute("SELECT id FROM transactions WHERE amount = 110000").fetchone()[0]
         conn.execute("INSERT INTO matches (invoice_id, transaction_id, confirmed_by) VALUES (?, ?, 1)", (inv, tx))
         # 同額の別請求書を追加しても、確定済みの入金は候補に出ない
@@ -67,7 +67,7 @@ def test_confirmed_match_is_paid_and_tx_not_reused(db_path):
             (inv,),
         )
         views = _views(conn)
-    assert views["INV-2026-0101"].status == matching.STATUS_PAID
+    assert views["20260901-1"].status == matching.STATUS_PAID
     assert views["X-1"].candidates == []
     assert views["X-1"].status == matching.STATUS_OVERDUE
 

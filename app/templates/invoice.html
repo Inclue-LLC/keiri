@@ -12,6 +12,7 @@
   <dt>請求日</dt><dd>{{ inv.issue_date or "—" }}</dd>
   <dt>支払期限</dt><dd>{{ inv.due_date or "—" }}</dd>
   <dt>請求額</dt><dd class="strong">{{ inv.amount|yen }}円</dd>
+  {% if inv.memo %}<dt>備考</dt><dd class="memo">{{ inv.memo }}</dd>{% endif %}
   <dt>照合に使う名義</dt>
   <dd>
     {% if inv.client_kana %}{{ inv.client_kana }}{% else %}<span class="muted">カナ未登録</span>{% endif %}

@@ -119,3 +119,4 @@ form.stack { display: grid; gap: 8px; max-width: 360px; }
   .cand-main { grid-template-columns: 1fr; gap: 2px; }
   .topbar { gap: 8px; }
 }
+.memo { white-space: pre-wrap; }

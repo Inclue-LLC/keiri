@@ -29,6 +29,7 @@ class ParsedInvoice:
     issue_date: str | None
     due_date: str | None
     amount: int
+    memo: str = ""
 
 
 @dataclass
@@ -57,16 +58,17 @@ BANKS = {
 # 先に書いたものほど優先。完全一致 → 部分一致の順に探す
 INVOICE_COLUMNS = {
     "invoice_no": ["請求書番号", "請求番号", "書類番号", "請求書No", "請求書NO", "No"],
-    "client_name": ["取引先名", "取引先", "請求先名", "請求先", "宛先", "宛名", "顧客名", "会社名"],
+    "client_name": ["請求先", "請求先名", "取引先名", "取引先", "宛先", "宛名", "顧客名", "会社名"],
     "client_kana": ["取引先名カナ", "取引先カナ", "フリガナ", "カナ"],
     "subject": ["件名", "タイトル", "案件名"],
     "issue_date": ["請求日", "発行日", "請求書日付", "日付"],
-    "due_date": ["支払期限", "お支払期限", "支払期日", "入金期日", "入金予定日", "振込期限"],
+    "due_date": ["お支払い期限", "お支払期限", "支払い期限", "支払期限", "支払期日", "入金期日", "入金予定日", "振込期限"],
     "amount": [
-        "差引請求額", "差引請求金額", "ご請求金額", "請求金額", "合計金額(税込)", "税込合計",
+        "請求額", "差引請求額", "差引請求金額", "ご請求金額", "請求金額", "合計金額(税込)", "税込合計",
         "税込合計金額", "税込金額", "合計金額", "合計", "金額",
     ],
     "status": ["ステータス", "状態"],
+    "memo": ["備考", "メモ"],
 }
 
 BANK_COLUMNS = {
@@ -147,6 +149,17 @@ def parse_date(value: str) -> str | None:
     raise ValueError(f"日付を解釈できません: {value}")
 
 
+def issue_date_from_invoice_no(invoice_no: str) -> str | None:
+    """請求日の列がない INVOY CSV 向けに、請求書番号の先頭8桁（例: 20260105-1）を請求日とみなす。"""
+    m = re.match(r"^(\d{4})(\d{2})(\d{2})(?:\D|$)", invoice_no)
+    if not m:
+        return None
+    try:
+        return date(int(m.group(1)), int(m.group(2)), int(m.group(3))).isoformat()
+    except ValueError:
+        return None
+
+
 def parse_amount(value: str) -> int | None:
     s = unicodedata.normalize("NFKC", value or "")
     s = re.sub(r"[,\s円¥\\]", "", s)
@@ -182,8 +195,8 @@ def parse_invoy(data: bytes) -> ParseResult:
         if not invoice_no:
             result.skipped += 1
             continue
-        status = _cell(row, cols, "status")
-        if "下書" in status or "削除" in status:
+        # INVOY のステータスは「下書き」のまま運用されていることが多いため、削除済み以外は取り込む
+        if "削除" in _cell(row, cols, "status"):
             result.skipped += 1
             continue
         try:
@@ -195,9 +208,10 @@ def parse_invoy(data: bytes) -> ParseResult:
                 client_name=_cell(row, cols, "client_name"),
                 client_kana=_cell(row, cols, "client_kana"),
                 subject=_cell(row, cols, "subject"),
-                issue_date=parse_date(_cell(row, cols, "issue_date")),
+                issue_date=parse_date(_cell(row, cols, "issue_date")) or issue_date_from_invoice_no(invoice_no),
                 due_date=parse_date(_cell(row, cols, "due_date")),
                 amount=amount,
+                memo=_cell(row, cols, "memo"),
             )
         except ValueError as e:
             result.skipped += 1
