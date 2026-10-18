@@ -32,9 +32,22 @@ uvicorn app.main:create_app --factory --host 127.0.0.1 --port 8000
 ブラウザで http://127.0.0.1:8000 を開いてログインします。
 `sample_data/` に動作確認用の CSV があります。
 
+### インターネットに公開する（Render）
+
+`render.yaml` に [Render](https://render.com) 用の設定があります。
+
+1. Render にログインし、Dashboard の **New → Blueprint** でこのリポジトリを選ぶ（GitHub 連携で `inclue-llc/keiri` へのアクセスを許可する）
+2. `KEIRI_INITIAL_USER` / `KEIRI_INITIAL_PASSWORD` に最初のログインユーザーを入力して作成
+3. 発行された `https://keiri-xxxx.onrender.com` を開いてログイン
+
+- データ（SQLite）は永続ディスク `/var/data` に保存されるため、有料プラン（Starter 以上）が必要
+- 初期ユーザーはユーザーが1人もいないときだけ作られる。2人目以降は画面の「ユーザー」から追加
+- `claude/wizardly-clarke-xstnyy` ブランチへの push で自動的に再デプロイされる
+- 時刻は日本時間（`TZ=Asia/Tokyo`）、Cookie は HTTPS 専用、検索エンジンにはインデックスさせない
+
 ### 本番運用の注意
 
-- 社外からアクセスさせる場合は nginx 等のリバースプロキシで HTTPS 化し、`KEIRI_COOKIE_SECURE=1` を設定してください。
+- 自前のサーバーで社外からアクセスさせる場合は nginx 等のリバースプロキシで HTTPS 化し、`KEIRI_COOKIE_SECURE=1` を設定してください。
 - `data/` ディレクトリ（DB とセッション署名鍵）を定期的にバックアップしてください。
 - パスワードを忘れた場合: `python -m app.cli reset-password <ユーザー名>`
 
@@ -49,6 +62,7 @@ uvicorn app.main:create_app --factory --host 127.0.0.1 --port 8000
 | `KEIRI_DATE_WINDOW_AFTER_DUE` | `45` | 支払期限の何日後までの入金を妥当とみなすか |
 | `KEIRI_COOKIE_SECURE` | `0` | HTTPS 運用時は `1` |
 | `KEIRI_SESSION_MAX_AGE` | `28800` | ログインの有効期間（秒） |
+| `KEIRI_INITIAL_USER` / `KEIRI_INITIAL_PASSWORD` | なし | ユーザーが1人もいないときに起動時に作成する初期ユーザー |
 
 ## 使い方
 

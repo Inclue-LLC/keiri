@@ -10,7 +10,9 @@ from collections import defaultdict
 
 _N, _R, _P = 2**14, 8, 1
 
+# ログイン失敗の上限（15分間）。ユーザー名ごとと、接続元 IP ごとに数える
 MAX_FAILURES = 5
+MAX_FAILURES_PER_IP = 20
 LOCK_SECONDS = 15 * 60
 _failures: dict[str, list[float]] = defaultdict(list)
 
@@ -42,18 +44,26 @@ def validate_new_password(password: str) -> str | None:
     return None
 
 
-def is_locked(username: str) -> bool:
+def _keys(username: str, ip: str) -> list[tuple[str, int]]:
+    return [(f"user:{username}", MAX_FAILURES), (f"ip:{ip}", MAX_FAILURES_PER_IP)]
+
+
+def is_locked(username: str, ip: str = "") -> bool:
     now = time.time()
-    _failures[username] = [t for t in _failures[username] if now - t < LOCK_SECONDS]
-    return len(_failures[username]) >= MAX_FAILURES
+    for key, limit in _keys(username, ip):
+        _failures[key] = [t for t in _failures[key] if now - t < LOCK_SECONDS]
+        if len(_failures[key]) >= limit:
+            return True
+    return False
 
 
-def record_failure(username: str) -> None:
-    _failures[username].append(time.time())
+def record_failure(username: str, ip: str = "") -> None:
+    for key, _ in _keys(username, ip):
+        _failures[key].append(time.time())
 
 
 def clear_failures(username: str) -> None:
-    _failures.pop(username, None)
+    _failures.pop(f"user:{username}", None)
 
 
 def csrf_token(session: dict) -> str:

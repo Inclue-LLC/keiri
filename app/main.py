@@ -33,6 +33,7 @@ def create_app(db_path: Path | None = None, secret_key: str | None = None) -> Fa
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     app.state.db_path = Path(db_path or config.DB_PATH)
     db.init_db(app.state.db_path)
+    _create_initial_user(app.state.db_path)
 
     app.add_middleware(
         SessionMiddleware,
@@ -51,6 +52,9 @@ def create_app(db_path: Path | None = None, secret_key: str | None = None) -> Fa
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "same-origin"
         response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Robots-Tag"] = "noindex, nofollow"
+        if config.COOKIE_SECURE:
+            response.headers["Strict-Transport-Security"] = "max-age=31536000"
         return response
 
     @app.exception_handler(LoginRequired)
@@ -63,6 +67,24 @@ def create_app(db_path: Path | None = None, secret_key: str | None = None) -> Fa
 
     _register_routes(app)
     return app
+
+
+def _create_initial_user(db_path: Path) -> None:
+    """サーバー上でコマンドを実行できない環境向けに、ユーザーが1人もいなければ環境変数から作成する。"""
+    username = config.INITIAL_USER.strip()
+    password = config.INITIAL_PASSWORD
+    if not username or not password:
+        return
+    err = auth.validate_new_password(password)
+    if err:
+        raise RuntimeError(f"KEIRI_INITIAL_PASSWORD: {err}")
+    with db.transaction(db_path) as conn:
+        if conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]:
+            return
+        conn.execute(
+            "INSERT INTO users (username, password_hash) VALUES (?, ?)", (username, auth.hash_password(password))
+        )
+        db.audit(conn, None, "user_create", f"{username}（初期ユーザー）")
 
 
 # ---------------------------------------------------------------- helpers
@@ -164,6 +186,10 @@ def import_transactions(conn: sqlite3.Connection, parsed: csv_import.ParseResult
 
 def _register_routes(app: FastAPI) -> None:
 
+    @app.get("/healthz")
+    def healthz():
+        return Response("ok", media_type="text/plain")
+
     # --- 認証 ---
 
     @app.get("/login")
@@ -181,7 +207,8 @@ def _register_routes(app: FastAPI) -> None:
         require_csrf(request, csrf)
         username = username.strip()
         error = None
-        if auth.is_locked(username):
+        ip = request.client.host if request.client else ""
+        if auth.is_locked(username, ip):
             error = "ログイン試行回数が上限に達しました。しばらく待ってから再度お試しください"
         else:
             with _conn(request) as conn:
@@ -192,7 +219,7 @@ def _register_routes(app: FastAPI) -> None:
                     request.session["user_id"] = user["id"]
                     db.audit(conn, user["id"], "login")
                     return redirect(_safe_next(next))
-            auth.record_failure(username)
+            auth.record_failure(username, ip)
             error = "ユーザー名またはパスワードが違います"
         return render(request, "login.html", next=_safe_next(next), error=error, status_code=401)
 

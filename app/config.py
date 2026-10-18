@@ -19,6 +19,10 @@ DATE_WINDOW_AFTER_DUE = int(os.environ.get("KEIRI_DATE_WINDOW_AFTER_DUE", "45"))
 COOKIE_SECURE = os.environ.get("KEIRI_COOKIE_SECURE", "0") == "1"
 SESSION_MAX_AGE = int(os.environ.get("KEIRI_SESSION_MAX_AGE", str(60 * 60 * 8)))
 
+# ユーザーが1人もいない場合に起動時に作成する初期ユーザー（サーバーでコマンドを実行できない環境向け）
+INITIAL_USER = os.environ.get("KEIRI_INITIAL_USER", "")
+INITIAL_PASSWORD = os.environ.get("KEIRI_INITIAL_PASSWORD", "")
+
 
 def secret_key() -> str:
     """セッション署名鍵。環境変数がなければデータディレクトリに生成して永続化する。"""

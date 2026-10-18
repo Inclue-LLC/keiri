@@ -215,3 +215,46 @@ def test_upload_multiple_files(logged_in):
     )
     assert "a.csv: 三井住友銀行 入金 新規2件" in r.text
     assert "b.csv: 三井住友銀行 入金 新規0件・取込済のためスキップ2件" in r.text
+
+
+def test_initial_user_from_env(tmp_path, monkeypatch):
+    from app import config
+    from app.main import create_app
+
+    monkeypatch.setattr(config, "INITIAL_USER", "admin")
+    monkeypatch.setattr(config, "INITIAL_PASSWORD", "initial-password")
+    path = tmp_path / "t.db"
+    create_app(db_path=path, secret_key="s")
+    create_app(db_path=path, secret_key="s")  # 2回目の起動では作り直さない
+    with db.transaction(path) as conn:
+        assert [r[0] for r in conn.execute("SELECT username FROM users")] == ["admin"]
+
+    monkeypatch.setattr(config, "INITIAL_USER", "other")
+    create_app(db_path=path, secret_key="s")
+    with db.transaction(path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 1
+
+
+def test_initial_user_rejects_short_password(tmp_path, monkeypatch):
+    import pytest
+    from app import config
+    from app.main import create_app
+
+    monkeypatch.setattr(config, "INITIAL_USER", "admin")
+    monkeypatch.setattr(config, "INITIAL_PASSWORD", "short")
+    with pytest.raises(RuntimeError):
+        create_app(db_path=tmp_path / "t.db", secret_key="s")
+
+
+def test_ip_lockout_across_usernames(client):
+    token = csrf_of(client)
+    for n in range(20):
+        client.post("/login", data={"username": f"user{n}", "password": "x", "csrf": token})
+    r = client.post("/login", data={"username": "keiri", "password": "correct-horse-battery", "csrf": token})
+    assert "上限" in r.text
+
+
+def test_healthz_and_headers(client):
+    r = client.get("/healthz")
+    assert r.status_code == 200 and r.text == "ok"
+    assert r.headers["X-Robots-Tag"] == "noindex, nofollow"
