@@ -3,6 +3,8 @@
 各サービスの CSV は列名や前置き行が微妙に異なるため、列は「候補名リスト」で探す。
 列名が合わない場合は *_COLUMNS の候補に追加すれば対応できる。
 """
+from __future__ import annotations
+
 import csv
 import hashlib
 import io

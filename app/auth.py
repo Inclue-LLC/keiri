@@ -1,4 +1,6 @@
 """パスワードハッシュ、ログイン試行制限、CSRF トークン。"""
+from __future__ import annotations
+
 import base64
 import hashlib
 import hmac

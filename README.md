@@ -3,13 +3,23 @@
 INVOY の請求書 CSV と、三井住友銀行・GMOあおぞらネット銀行の入出金明細 CSV を取り込み、
 請求書と入金を照合して消込候補を提示する社内向け Web アプリです。**最終確定は必ず人が画面で行います。**
 
-- 構成: Python 3.11+ / FastAPI / SQLite / Jinja2（外部サービス・CDN 不使用）
+- 構成: Python 3.9+ / FastAPI / SQLite / Jinja2（外部サービス・CDN 不使用）
 - データ: `data/keiri.db`（SQLite 1ファイル）
 
 ## セットアップ
 
+### かんたん起動（Mac）
+
 ```bash
-python3 -m venv .venv && . .venv/bin/activate
+./start.sh
+```
+
+初回はライブラリのインストールと最初のユーザー作成を行い、ブラウザが自動で開きます。2回目以降は起動のみです。
+
+### 手動で行う場合
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
 # 最初のユーザーを作成（2人目以降は画面の「ユーザー」から追加可）

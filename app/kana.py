@@ -3,6 +3,8 @@
 銀行明細の振込名義は「ｶ)ﾔﾏﾀﾞｼﾖｳｼﾞ」「ﾔﾏﾀﾞｼｮｳｼﾞ(ｶ」のように
 半角カナ・法人略語・拗音の大文字化などの揺れがあるため、比較前に正規化する。
 """
+from __future__ import annotations
+
 import re
 import unicodedata
 from difflib import SequenceMatcher

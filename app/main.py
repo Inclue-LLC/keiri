@@ -1,4 +1,6 @@
 """入金消込 Web アプリ本体。"""
+from __future__ import annotations
+
 import sqlite3
 from pathlib import Path
 from urllib.parse import quote

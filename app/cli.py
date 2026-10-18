@@ -3,6 +3,8 @@
     python -m app.cli create-user <ユーザー名>
     python -m app.cli reset-password <ユーザー名>
 """
+from __future__ import annotations
+
 import argparse
 import getpass
 import sqlite3

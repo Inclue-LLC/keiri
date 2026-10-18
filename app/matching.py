@@ -2,6 +2,8 @@
 
 照合は候補を提示するだけで、確定（matches への登録）は必ず人が画面から行う。
 """
+from __future__ import annotations
+
 import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass, field
