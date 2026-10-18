@@ -4,13 +4,12 @@
 """
 from __future__ import annotations
 
-import sqlite3
 from collections import defaultdict
 from itertools import combinations
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 
-from . import config, kana
+from . import config, kana, repo
 
 STATUS_PAID = "入金済"
 STATUS_REVIEW = "要確認"
@@ -28,7 +27,7 @@ COMBINE_POOL_SIZE = 12
 
 @dataclass
 class Candidate:
-    transaction: sqlite3.Row
+    transaction: dict
     amount_diff: int  # 請求額 - 入金額（正なら入金が少ない）
     name_score: float
     matched_name: str
@@ -36,9 +35,9 @@ class Candidate:
     score: int = 0
     reasons: list[tuple[str, str]] = field(default_factory=list)  # (ラベル, 種別: ok/warn/ng)
     # まとめ入金の場合、合計が入金額になる請求書の組（自分を含む）。単独の場合は空
-    group: list[sqlite3.Row] = field(default_factory=list)
+    group: list[dict] = field(default_factory=list)
     days_from_due: int = 0
-    invoice_id: int = 0
+    invoice_id: str = ""
 
     @property
     def fee_suspected(self) -> bool:
@@ -51,13 +50,13 @@ class Candidate:
 
 @dataclass
 class InvoiceView:
-    invoice: sqlite3.Row
+    invoice: dict
     status: str
     candidates: list[Candidate]
-    match: sqlite3.Row | None
+    match: dict | None
 
 
-def name_keys(client: sqlite3.Row, aliases: list[sqlite3.Row]) -> list[tuple[str, str]]:
+def name_keys(client: dict, aliases: list[dict]) -> list[tuple[str, str]]:
     """取引先に対して照合に使う (表示名, 正規化名) の一覧。"""
     keys = []
     for raw in [client["name_kana"], client["name"], *(a["alias"] for a in aliases)]:
@@ -67,7 +66,7 @@ def name_keys(client: sqlite3.Row, aliases: list[sqlite3.Row]) -> list[tuple[str
     return keys
 
 
-def _date_ok(invoice: sqlite3.Row, tx_date: str) -> bool:
+def _date_ok(invoice: dict, tx_date: str) -> bool:
     d = date.fromisoformat(tx_date)
     issue = date.fromisoformat(invoice["issue_date"]) if invoice["issue_date"] else None
     due = date.fromisoformat(invoice["due_date"]) if invoice["due_date"] else None
@@ -92,7 +91,7 @@ def name_score(payer_kana: str, keys: list[tuple[str, str]]) -> tuple[str, float
     return best_name, best_score
 
 
-def _days_from_due(invoice: sqlite3.Row, tx_date: str) -> int:
+def _days_from_due(invoice: dict, tx_date: str) -> int:
     base = invoice["due_date"] or invoice["issue_date"]
     if not base:
         return 0
@@ -115,7 +114,7 @@ def _add_name_and_date_reasons(c: Candidate) -> None:
         c.reasons.append(("日付が期間外", "ng"))
 
 
-def evaluate(invoice: sqlite3.Row, tx: sqlite3.Row, keys: list[tuple[str, str]]) -> Candidate | None:
+def evaluate(invoice: dict, tx: dict, keys: list[tuple[str, str]]) -> Candidate | None:
     """1件の請求書と入金を比較し、候補になるなら Candidate を返す。"""
     diff = invoice["amount"] - tx["amount"]
     if diff < 0 or diff > config.FEE_TOLERANCE:
@@ -145,7 +144,7 @@ def evaluate(invoice: sqlite3.Row, tx: sqlite3.Row, keys: list[tuple[str, str]])
 
 
 def combined_candidates(
-    tx: sqlite3.Row, invoices: list[sqlite3.Row], keys: list[tuple[str, str]]
+    tx: dict, invoices: list[dict], keys: list[tuple[str, str]]
 ) -> list[Candidate]:
     """1回の入金が同じ取引先の複数請求書の合計（手数料差引を含む）になっていないか探す。
 
@@ -180,33 +179,19 @@ def combined_candidates(
     return result
 
 
-def _load_aliases(conn: sqlite3.Connection) -> dict[int, list[sqlite3.Row]]:
-    by_client = defaultdict(list)
-    for a in conn.execute("SELECT * FROM client_aliases"):
-        by_client[a["client_id"]].append(a)
-    return by_client
-
-
-def build_views(conn: sqlite3.Connection, today: date | None = None) -> list[InvoiceView]:
+def build_views(snap: repo.Snapshot, today: date | None = None) -> list[InvoiceView]:
     """全請求書のステータスと候補を計算する。"""
-    today = today or date.today()
-    invoices = conn.execute(
-        """SELECT i.*, c.name AS client_name, c.name_kana AS client_kana
-           FROM invoices i JOIN clients c ON c.id = i.client_id
-           ORDER BY COALESCE(i.due_date, i.issue_date) DESC, i.invoice_no DESC"""
-    ).fetchall()
-    clients = {c["id"]: c for c in conn.execute("SELECT * FROM clients")}
-    aliases = _load_aliases(conn)
-    matches = {m["invoice_id"]: m for m in conn.execute("SELECT * FROM matches")}
-    used_tx = {m["transaction_id"] for m in matches.values() if m["transaction_id"]}
-    open_tx = [t for t in conn.execute("SELECT * FROM transactions ORDER BY date") if t["id"] not in used_tx]
+    today = today or repo.today()
+    invoices = snap.invoices
+    matches = snap.matches
+    open_tx = [t for t in snap.transactions if not t.get("invoice_ids")]
 
     # 金額で絞り込んでから名義比較する
     by_amount = defaultdict(list)
     for t in open_tx:
         by_amount[t["amount"]].append(t)
 
-    keys_by_client = {cid: name_keys(c, aliases[cid]) for cid, c in clients.items()}
+    keys_by_client = {cid: name_keys(c, snap.aliases.get(cid, [])) for cid, c in snap.clients.items()}
     open_by_client = defaultdict(list)
     for inv in invoices:
         if inv["id"] not in matches:
@@ -215,7 +200,7 @@ def build_views(conn: sqlite3.Connection, today: date | None = None) -> list[Inv
     for t in open_tx:
         for cid, invs in open_by_client.items():
             if len(invs) >= 2:
-                for c in combined_candidates(t, invs, keys_by_client[cid]):
+                for c in combined_candidates(t, invs, keys_by_client.get(cid, [])):
                     combined_by_invoice[c.invoice_id].append(c)
 
     views = []
@@ -224,7 +209,7 @@ def build_views(conn: sqlite3.Connection, today: date | None = None) -> list[Inv
         if match:
             views.append(InvoiceView(inv, STATUS_PAID, [], match))
             continue
-        keys = keys_by_client[inv["client_id"]]
+        keys = keys_by_client.get(inv["client_id"], [])
         cands = []
         for amt in range(inv["amount"] - config.FEE_TOLERANCE, inv["amount"] + 1):
             for t in by_amount.get(amt, ()):

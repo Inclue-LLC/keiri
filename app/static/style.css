@@ -126,3 +126,6 @@ form.stack { display: grid; gap: 8px; max-width: 360px; }
 .formats dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 0 0 12px; }
 .formats dt { color: var(--muted); }
 .formats dd { margin: 0; }
+a.button { display: inline-block; text-align: center; padding: 8px 12px; border-radius: 6px; border: 1px solid var(--border); }
+a.button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+a.button:hover { text-decoration: none; }

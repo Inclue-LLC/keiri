@@ -10,7 +10,7 @@ if [ ! -d .venv ]; then
   .venv/bin/python -m pip install -q -r requirements.txt
 fi
 
-USERS=$(.venv/bin/python -c "from app import db; db.init_db(); c = db.connect(); print(c.execute('SELECT COUNT(*) FROM users').fetchone()[0])")
+USERS=$(.venv/bin/python -c "from app import repo; from app.main import make_store; print(len(repo.list_users(make_store())))")
 if [ "$USERS" = "0" ]; then
   echo "最初のユーザーを作成します。"
   read -r -p "ユーザー名: " NAME

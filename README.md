@@ -3,8 +3,9 @@
 INVOY の請求書 CSV と、三井住友銀行・GMOあおぞらネット銀行の入出金明細 CSV を取り込み、
 請求書と入金を照合して消込候補を提示する社内向け Web アプリです。**最終確定は必ず人が画面で行います。**
 
-- 構成: Python 3.9+ / FastAPI / SQLite / Jinja2（外部サービス・CDN 不使用）
-- データ: `data/keiri.db`（SQLite 1ファイル）
+- 構成: Python 3.9+ / FastAPI / Jinja2（CDN 不使用）
+- 本番: Google Cloud Run + Firestore（東京）、Google アカウント（@inclue-llc.jp）でログイン → [公開手順](docs/deploy-google-cloud.md)
+- ローカル（Mac）: データは `data/keiri.json`、ユーザー名とパスワードでログイン
 
 ## セットアップ
 
@@ -32,37 +33,37 @@ uvicorn app.main:create_app --factory --host 127.0.0.1 --port 8000
 ブラウザで http://127.0.0.1:8000 を開いてログインします。
 `sample_data/` に動作確認用の CSV があります。
 
-### インターネットに公開する（Render）
+### インターネットに公開する（Google Cloud）
 
-`render.yaml` に [Render](https://render.com) 用の設定があります。
+[docs/deploy-google-cloud.md](docs/deploy-google-cloud.md) の手順で、ブラウザの管理画面だけで公開できます。
 
-1. Render にログインし、Dashboard の **New → Blueprint** でこのリポジトリを選ぶ（GitHub 連携で `inclue-llc/keiri` へのアクセスを許可する）
-2. `KEIRI_INITIAL_USER` / `KEIRI_INITIAL_PASSWORD` に最初のログインユーザーを入力して作成
-3. 発行された `https://keiri-xxxx.onrender.com` を開いてログイン
+- Cloud Run が GitHub のこのブランチから `Dockerfile` でビルド・公開する（push で自動更新）
+- データは Firestore（asia-northeast1）。セッション署名鍵も Firestore に自動生成して共有する
+- ログインは Google アカウントのみ（`KEIRI_ALLOWED_DOMAIN` のドメインに限定）
+- Cloud Run の最大インスタンス数は 1 にする（画面表示用の読み込みをインスタンス内で短時間キャッシュしているため）
 
-- データ（SQLite）は永続ディスク `/var/data` に保存されるため、有料プラン（Starter 以上）が必要
-- 初期ユーザーはユーザーが1人もいないときだけ作られる。2人目以降は画面の「ユーザー」から追加
-- `claude/wizardly-clarke-xstnyy` ブランチへの push で自動的に再デプロイされる
-- 時刻は日本時間（`TZ=Asia/Tokyo`）、Cookie は HTTPS 専用、検索エンジンにはインデックスさせない
+### ローカル運用の注意
 
-### 本番運用の注意
-
-- 自前のサーバーで社外からアクセスさせる場合は nginx 等のリバースプロキシで HTTPS 化し、`KEIRI_COOKIE_SECURE=1` を設定してください。
-- `data/` ディレクトリ（DB とセッション署名鍵）を定期的にバックアップしてください。
+- `data/` ディレクトリ（`keiri.json`）を定期的にバックアップしてください。
 - パスワードを忘れた場合: `python -m app.cli reset-password <ユーザー名>`
 
 ### 環境変数
 
 | 変数 | 既定値 | 内容 |
 |---|---|---|
-| `KEIRI_DATA_DIR` | `./data` | DB・署名鍵の保存先 |
-| `KEIRI_SECRET_KEY` | 自動生成 | セッション Cookie の署名鍵 |
+| `KEIRI_STORE` | `file` | 保存先。`file`（ローカルの JSON）または `firestore` |
+| `KEIRI_DATA_DIR` | `./data` | `file` のときの保存先ディレクトリ |
+| `KEIRI_AUTH` | `password` | ログイン方式。`password` または `google` |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | なし | Google ログインの OAuth クライアント |
+| `KEIRI_ALLOWED_DOMAIN` | なし | Google ログインを許可するドメイン（例: `inclue-llc.jp`） |
+| `KEIRI_ALLOWED_EMAILS` | なし | さらに個別のメールアドレスに絞る場合（カンマ区切り） |
+| `KEIRI_SECRET_KEY` | 自動生成 | セッション Cookie の署名鍵（未設定なら保存先に生成） |
 | `KEIRI_FEE_TOLERANCE` | `880` | 「手数料差引の可能性あり」とみなす差額の上限（円） |
 | `KEIRI_DATE_WINDOW_BEFORE_ISSUE` | `7` | 請求日の何日前からの入金を妥当とみなすか |
 | `KEIRI_DATE_WINDOW_AFTER_DUE` | `45` | 支払期限の何日後までの入金を妥当とみなすか |
-| `KEIRI_COOKIE_SECURE` | `0` | HTTPS 運用時は `1` |
+| `KEIRI_COOKIE_SECURE` | `0` | HTTPS 運用時は `1`（Dockerfile では `1`） |
 | `KEIRI_SESSION_MAX_AGE` | `28800` | ログインの有効期間（秒） |
-| `KEIRI_INITIAL_USER` / `KEIRI_INITIAL_PASSWORD` | なし | ユーザーが1人もいないときに起動時に作成する初期ユーザー |
+| `KEIRI_INITIAL_USER` / `KEIRI_INITIAL_PASSWORD` | なし | パスワード方式で、ユーザーが1人もいないときに起動時に作成する初期ユーザー |
 
 ## 使い方
 
@@ -131,4 +132,7 @@ uvicorn app.main:create_app --factory --host 127.0.0.1 --port 8000
 ```bash
 pip install -r requirements-dev.txt
 pytest
+
+# Firestore でも同じテストを実行する場合（Firestore エミュレーターを起動して）
+FIRESTORE_EMULATOR_HOST=127.0.0.1:8089 pytest
 ```

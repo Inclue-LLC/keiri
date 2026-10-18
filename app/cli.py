@@ -1,4 +1,4 @@
-"""管理用コマンド。
+"""管理用コマンド（パスワード方式のとき）。
 
     python -m app.cli create-user <ユーザー名>
     python -m app.cli reset-password <ユーザー名>
@@ -7,10 +7,10 @@ from __future__ import annotations
 
 import argparse
 import getpass
-import sqlite3
 import sys
 
-from . import auth, db
+from . import auth, repo
+from .main import make_store
 
 
 def _read_password() -> str:
@@ -33,22 +33,20 @@ def main(argv: list[str] | None = None) -> int:
         sub.add_parser(name).add_argument("username")
     args = parser.parse_args(argv)
 
-    db.init_db()
+    store = make_store()
     pw_hash = auth.hash_password(_read_password())
-    with db.transaction() as conn:
-        if args.command == "create-user":
-            try:
-                conn.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", (args.username, pw_hash))
-            except sqlite3.IntegrityError:
-                print(f"ユーザー {args.username} は既に存在します", file=sys.stderr)
-                return 1
-            db.audit(conn, None, "user_create", f"{args.username}（CLI）")
-        else:
-            cur = conn.execute("UPDATE users SET password_hash = ? WHERE username = ?", (pw_hash, args.username))
-            if not cur.rowcount:
-                print(f"ユーザー {args.username} が見つかりません", file=sys.stderr)
-                return 1
-            db.audit(conn, None, "password_reset", f"{args.username}（CLI）")
+    if args.command == "create-user":
+        if not repo.create_user(store, args.username, pw_hash):
+            print(f"ユーザー {args.username} は既に存在します", file=sys.stderr)
+            return 1
+        repo.audit(store, None, "user_create", f"{args.username}（CLI）")
+    else:
+        user = repo.find_user(store, args.username)
+        if not user:
+            print(f"ユーザー {args.username} が見つかりません", file=sys.stderr)
+            return 1
+        repo.set_password(store, user["id"], pw_hash)
+        repo.audit(store, None, "password_reset", f"{args.username}（CLI）")
     print("完了しました")
     return 0
 

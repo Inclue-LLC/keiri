@@ -2,6 +2,13 @@
 {% block title %}ユーザー{% endblock %}
 {% block content %}
 <h1>ユーザー</h1>
+{% if auth_mode == "google" %}
+<section class="card">
+  <h2>ユーザー一覧</h2>
+  <p class="muted small">{% if allowed_domain %}{{ allowed_domain }} の{% endif %}Google アカウントで初めてログインした人が自動で登録されます。</p>
+  <ul>{% for u in rows %}<li>{{ u.username }} <span class="muted small">{{ u.created_at }}</span></li>{% endfor %}</ul>
+</section>
+{% else %}
 <div class="cols">
 <section class="card">
   <h2>ユーザー一覧</h2>
@@ -24,6 +31,7 @@
   </form>
 </section>
 </div>
+{% endif %}
 
 <h2>操作履歴</h2>
 <div class="table-wrap">
@@ -31,7 +39,7 @@
   <thead><tr><th>日時</th><th>ユーザー</th><th>操作</th><th>内容</th></tr></thead>
   <tbody>
   {% for l in logs %}
-    <tr><td>{{ l.created_at }}</td><td>{{ l.username or "（CLI）" }}</td><td>{{ l.action }}</td><td>{{ l.detail }}</td></tr>
+    <tr><td>{{ l.created_at }}</td><td>{{ l.username or "（システム）" }}</td><td>{{ l.action }}</td><td>{{ l.detail }}</td></tr>
   {% endfor %}
   </tbody>
 </table>

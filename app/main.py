@@ -1,7 +1,7 @@
 """入金消込 Web アプリ本体。"""
 from __future__ import annotations
 
-import sqlite3
+import secrets
 from pathlib import Path
 from urllib.parse import quote
 
@@ -11,7 +11,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import auth, config, csv_import, db, kana, matching
+from . import auth, config, csv_import, google_auth, kana, matching, repo
+from .store import FileStore, FirestoreStore, Store
 
 BASE_DIR = Path(__file__).resolve().parent
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
@@ -29,15 +30,21 @@ class CsrfError(Exception):
     pass
 
 
-def create_app(db_path: Path | None = None, secret_key: str | None = None) -> FastAPI:
+def make_store() -> Store:
+    if config.STORE == "firestore":
+        return FirestoreStore()
+    return FileStore(config.STORE_PATH)
+
+
+def create_app(store: Store | None = None, secret_key: str | None = None) -> FastAPI:
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
-    app.state.db_path = Path(db_path or config.DB_PATH)
-    db.init_db(app.state.db_path)
-    _create_initial_user(app.state.db_path)
+    app.state.store = store or make_store()
+    if config.AUTH == "password":
+        _create_initial_user(app.state.store)
 
     app.add_middleware(
         SessionMiddleware,
-        secret_key=secret_key or config.secret_key(),
+        secret_key=secret_key or config.SECRET_KEY or repo.session_secret(app.state.store),
         session_cookie="keiri_session",
         max_age=config.SESSION_MAX_AGE,
         same_site="lax",
@@ -69,7 +76,7 @@ def create_app(db_path: Path | None = None, secret_key: str | None = None) -> Fa
     return app
 
 
-def _create_initial_user(db_path: Path) -> None:
+def _create_initial_user(store: Store) -> None:
     """サーバー上でコマンドを実行できない環境向けに、ユーザーが1人もいなければ環境変数から作成する。"""
     username = config.INITIAL_USER.strip()
     password = config.INITIAL_PASSWORD
@@ -78,27 +85,23 @@ def _create_initial_user(db_path: Path) -> None:
     err = auth.validate_new_password(password)
     if err:
         raise RuntimeError(f"KEIRI_INITIAL_PASSWORD: {err}")
-    with db.transaction(db_path) as conn:
-        if conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]:
-            return
-        conn.execute(
-            "INSERT INTO users (username, password_hash) VALUES (?, ?)", (username, auth.hash_password(password))
-        )
-        db.audit(conn, None, "user_create", f"{username}（初期ユーザー）")
+    if repo.list_users(store):
+        return
+    if repo.create_user(store, username, auth.hash_password(password)):
+        repo.audit(store, repo.user_id_for(username), "user_create", f"{username}（初期ユーザー）")
 
 
 # ---------------------------------------------------------------- helpers
 
-def _conn(request: Request):
-    return db.transaction(request.app.state.db_path)
+def _store(request: Request) -> Store:
+    return request.app.state.store
 
 
-def current_user(request: Request) -> sqlite3.Row:
+def current_user(request: Request) -> dict:
     uid = request.session.get("user_id")
     if not uid:
         raise LoginRequired()
-    with _conn(request) as conn:
-        user = conn.execute("SELECT id, username FROM users WHERE id = ?", (uid,)).fetchone()
+    user = repo.get_user(_store(request), uid)
     if not user:
         request.session.clear()
         raise LoginRequired()
@@ -122,6 +125,8 @@ def render(request: Request, name: str, user=None, status_code: int = 200, **ctx
         bank_names=csv_import.BANKS,
         bank_formats=csv_import.BANK_CSV_FORMATS,
         fee_tolerance=config.FEE_TOLERANCE,
+        auth_mode=config.AUTH,
+        allowed_domain=config.ALLOWED_DOMAIN,
     )
     return templates.TemplateResponse(request, name, ctx, status_code=status_code)
 
@@ -136,50 +141,15 @@ def _safe_next(url: str | None) -> str:
     return "/"
 
 
-# ---------------------------------------------------------------- import
-
-def import_invoices(conn: sqlite3.Connection, parsed: csv_import.ParseResult) -> tuple[int, int, int]:
-    added = updated = skipped = 0
-    for inv in parsed.rows:
-        conn.execute("INSERT OR IGNORE INTO clients (name) VALUES (?)", (inv.client_name,))
-        client = conn.execute("SELECT * FROM clients WHERE name = ?", (inv.client_name,)).fetchone()
-        if inv.client_kana and not client["name_kana"]:
-            conn.execute("UPDATE clients SET name_kana = ? WHERE id = ?", (inv.client_kana, client["id"]))
-        existing = conn.execute(
-            "SELECT i.id, m.id AS match_id FROM invoices i LEFT JOIN matches m ON m.invoice_id = i.id "
-            "WHERE i.invoice_no = ?",
-            (inv.invoice_no,),
-        ).fetchone()
-        if existing is None:
-            conn.execute(
-                "INSERT INTO invoices (invoice_no, client_id, subject, issue_date, due_date, amount, memo) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (inv.invoice_no, client["id"], inv.subject, inv.issue_date, inv.due_date, inv.amount, inv.memo),
-            )
-            added += 1
-        elif existing["match_id"] is None:
-            conn.execute(
-                "UPDATE invoices SET client_id = ?, subject = ?, issue_date = ?, due_date = ?, amount = ?, memo = ? "
-                "WHERE id = ?",
-                (client["id"], inv.subject, inv.issue_date, inv.due_date, inv.amount, inv.memo, existing["id"]),
-            )
-            updated += 1
-        else:
-            # 確定済みの請求書は上書きしない
-            skipped += 1
-    return added, updated, skipped
+def _login(request: Request, user: dict, next_url: str) -> RedirectResponse:
+    request.session.clear()
+    request.session["user_id"] = user["id"]
+    repo.audit(_store(request), user["id"], "login")
+    return redirect(_safe_next(next_url))
 
 
-def import_transactions(conn: sqlite3.Connection, parsed: csv_import.ParseResult) -> tuple[int, int]:
-    added = 0
-    for t in parsed.rows:
-        cur = conn.execute(
-            "INSERT OR IGNORE INTO transactions (bank, date, amount, description, payer_kana, balance, dedupe_key) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (t.bank, t.date, t.amount, t.description, t.payer_kana, t.balance, t.dedupe_key),
-        )
-        added += cur.rowcount
-    return added, len(parsed.rows) - added
+def _google_redirect_uri(request: Request) -> str:
+    return str(request.url_for("google_callback"))
 
 
 # ---------------------------------------------------------------- routes
@@ -194,7 +164,10 @@ def _register_routes(app: FastAPI) -> None:
 
     @app.get("/login")
     def login_form(request: Request, next: str = "/"):
-        return render(request, "login.html", next=_safe_next(next))
+        return render(
+            request, "login.html", next=_safe_next(next),
+            google_ready=bool(config.GOOGLE_CLIENT_ID and config.GOOGLE_CLIENT_SECRET),
+        )
 
     @app.post("/login")
     def login(
@@ -205,23 +178,51 @@ def _register_routes(app: FastAPI) -> None:
         csrf: str = Form(""),
     ):
         require_csrf(request, csrf)
+        if config.AUTH != "password":
+            return redirect("/login")
         username = username.strip()
-        error = None
         ip = request.client.host if request.client else ""
         if auth.is_locked(username, ip):
             error = "ログイン試行回数が上限に達しました。しばらく待ってから再度お試しください"
         else:
-            with _conn(request) as conn:
-                user = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
-                if user and auth.verify_password(password, user["password_hash"]):
-                    auth.clear_failures(username)
-                    request.session.clear()
-                    request.session["user_id"] = user["id"]
-                    db.audit(conn, user["id"], "login")
-                    return redirect(_safe_next(next))
+            user = repo.find_user(_store(request), username)
+            if user and user.get("password_hash") and auth.verify_password(password, user["password_hash"]):
+                auth.clear_failures(username)
+                return _login(request, user, next)
             auth.record_failure(username, ip)
             error = "ユーザー名またはパスワードが違います"
         return render(request, "login.html", next=_safe_next(next), error=error, status_code=401)
+
+    @app.get("/auth/google")
+    def google_login(request: Request, next: str = "/"):
+        if config.AUTH != "google" or not config.GOOGLE_CLIENT_ID:
+            return redirect("/login")
+        state, nonce = secrets.token_urlsafe(24), secrets.token_urlsafe(24)
+        request.session["oauth"] = {"state": state, "nonce": nonce, "next": _safe_next(next)}
+        return RedirectResponse(google_auth.authorization_url(
+            config.GOOGLE_CLIENT_ID, _google_redirect_uri(request), state, nonce, config.ALLOWED_DOMAIN,
+        ))
+
+    @app.get("/auth/callback", name="google_callback")
+    def google_callback(request: Request, code: str = "", state: str = "", error: str = ""):
+        pending = request.session.pop("oauth", None)
+        try:
+            if config.AUTH != "google":
+                raise google_auth.LoginError("Google ログインは無効です")
+            if error or not code:
+                raise google_auth.LoginError("ログインがキャンセルされました")
+            if not pending or not secrets.compare_digest(pending["state"], state):
+                raise google_auth.LoginError("ログイン要求が一致しません。もう一度お試しください")
+            claims = google_auth.exchange_code(
+                code, config.GOOGLE_CLIENT_ID, config.GOOGLE_CLIENT_SECRET, _google_redirect_uri(request)
+            )
+            email = google_auth.validate_claims(
+                claims, config.GOOGLE_CLIENT_ID, pending["nonce"], config.ALLOWED_DOMAIN, config.ALLOWED_EMAILS
+            )
+        except google_auth.LoginError as e:
+            return render(request, "login.html", next="/", error=str(e), google_ready=True, status_code=401)
+        user = repo.ensure_user(_store(request), email)
+        return _login(request, user, pending["next"])
 
     @app.post("/logout")
     def logout(request: Request, csrf: str = Form("")):
@@ -234,8 +235,7 @@ def _register_routes(app: FastAPI) -> None:
     @app.get("/")
     def index(request: Request, status: str = "", q: str = ""):
         user = current_user(request)
-        with _conn(request) as conn:
-            views = matching.build_views(conn)
+        views = matching.build_views(repo.load(_store(request)))
         counts = {s: 0 for s in matching.STATUSES}
         for v in views:
             counts[v.status] += 1
@@ -259,11 +259,12 @@ def _register_routes(app: FastAPI) -> None:
     @app.get("/upload")
     def upload_form(request: Request):
         user = current_user(request)
-        with _conn(request) as conn:
-            history = conn.execute(
-                "SELECT im.*, u.username FROM imports im JOIN users u ON u.id = im.imported_by "
-                "ORDER BY im.id DESC LIMIT 20"
-            ).fetchall()
+        store = _store(request)
+        users = {u["id"]: u for u in repo.list_users(store)}
+        history = [
+            {**h, "username": users.get(h["imported_by"], {}).get("username", "")}
+            for h in repo.latest(store, "imports", 20)
+        ]
         return render(request, "upload.html", user, kinds=IMPORT_KINDS, history=history)
 
     @app.post("/upload")
@@ -285,36 +286,28 @@ def _register_routes(app: FastAPI) -> None:
     # --- 請求書詳細・消込 ---
 
     @app.get("/invoices/{invoice_id}")
-    def invoice_detail(request: Request, invoice_id: int, tx_q: str = ""):
+    def invoice_detail(request: Request, invoice_id: str, tx_q: str = ""):
         user = current_user(request)
-        with _conn(request) as conn:
-            view = next((v for v in matching.build_views(conn) if v.invoice["id"] == invoice_id), None)
-            if view is None:
-                return render(request, "not_found.html", user, status_code=404)
-            matched_tx = confirmed_by = None
-            group_invoices = []
-            if view.match:
-                if view.match["transaction_id"]:
-                    matched_tx = conn.execute(
-                        "SELECT * FROM transactions WHERE id = ?", (view.match["transaction_id"],)
-                    ).fetchone()
-                    group_invoices = conn.execute(
-                        "SELECT i.* FROM matches m JOIN invoices i ON i.id = m.invoice_id "
-                        "WHERE m.transaction_id = ? ORDER BY i.invoice_no",
-                        (view.match["transaction_id"],),
-                    ).fetchall()
-                confirmed_by = conn.execute(
-                    "SELECT username FROM users WHERE id = ?", (view.match["confirmed_by"],)
-                ).fetchone()["username"]
-            aliases = conn.execute(
-                "SELECT * FROM client_aliases WHERE client_id = ? ORDER BY id", (view.invoice["client_id"],)
-            ).fetchall()
-            search_results = []
-            if tx_q and not view.match:
-                search_results = _search_open_transactions(conn, tx_q)
+        snap = repo.load(_store(request))
+        view = next((v for v in matching.build_views(snap) if v.invoice["id"] == invoice_id), None)
+        if view is None:
+            return render(request, "not_found.html", user, status_code=404)
+        matched_tx = confirmed_by = None
+        group_invoices = []
+        if view.match:
+            if view.match.get("transaction_id"):
+                matched_tx = next((t for t in snap.transactions if t["id"] == view.match["transaction_id"]), None)
+                by_id = snap.invoices_by_id
+                group_invoices = sorted(
+                    (by_id[i] for i in (matched_tx or {}).get("invoice_ids", []) if i in by_id),
+                    key=lambda i: i["invoice_no"],
+                )
+            confirmed_by = snap.users.get(view.match["confirmed_by"], {}).get("username", "")
+        search_results = repo.search_open_transactions(snap, tx_q) if tx_q and not view.match else []
         return render(
             request, "invoice.html", user,
-            view=view, matched_tx=matched_tx, confirmed_by=confirmed_by, aliases=aliases,
+            view=view, matched_tx=matched_tx, confirmed_by=confirmed_by,
+            aliases=snap.aliases.get(view.invoice["client_id"], []),
             group_invoices=group_invoices if len(group_invoices) > 1 else [],
             tx_q=tx_q, search_results=search_results,
         )
@@ -322,9 +315,9 @@ def _register_routes(app: FastAPI) -> None:
     @app.post("/invoices/{invoice_id}/confirm")
     def confirm(
         request: Request,
-        invoice_id: int,
-        transaction_id: int = Form(...),
-        invoice_ids: list[int] = Form([]),
+        invoice_id: str,
+        transaction_id: str = Form(...),
+        invoice_ids: list[str] = Form([]),
         note: str = Form(""),
         register_alias: str = Form(""),
         csrf: str = Form(""),
@@ -332,82 +325,37 @@ def _register_routes(app: FastAPI) -> None:
         """入金を請求書に消し込む。invoice_ids を渡すとまとめ入金として複数の請求書を同時に確定する。"""
         user = current_user(request)
         require_csrf(request, csrf)
-        url = f"/invoices/{invoice_id}"
         ids = [invoice_id] + [i for i in dict.fromkeys(invoice_ids) if i != invoice_id]
-        with db.transaction(request.app.state.db_path) as conn:
-            invs = [conn.execute("SELECT * FROM invoices WHERE id = ?", (i,)).fetchone() for i in ids]
-            tx = conn.execute("SELECT * FROM transactions WHERE id = ?", (transaction_id,)).fetchone()
-            if not all(invs) or not tx:
-                flash(request, "請求書または入金明細が見つかりません", "error")
-                return redirect(url)
-            already = conn.execute(
-                f"SELECT COUNT(*) FROM matches WHERE transaction_id = ? OR invoice_id IN ({','.join('?' * len(ids))})",
-                (transaction_id, *ids),
-            ).fetchone()[0]
-            if already:
-                flash(request, "この請求書または入金は既に消込済です", "error")
-                return redirect(url)
-            fee_diff = sum(i["amount"] for i in invs) - tx["amount"]
-            for n, inv in enumerate(invs):
-                # まとめ入金の差額（手数料）は先頭の請求書にだけ記録する
-                conn.execute(
-                    "INSERT INTO matches (invoice_id, transaction_id, fee_diff, note, confirmed_by) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (inv["id"], transaction_id, fee_diff if n == 0 else 0, note.strip(), user["id"]),
-                )
-            if register_alias and tx["payer_kana"]:
-                _add_alias(conn, invs[0]["client_id"], tx["payer_kana"])
-            db.audit(
-                conn, user["id"], "confirm",
-                f"請求書 {' + '.join(i['invoice_no'] for i in invs)} ← 入金#{tx['id']} {tx['date']} "
-                f"{tx['amount']:,}円 {tx['payer_kana']}",
-            )
-        flash(request, f"入金済として確定しました（{len(invs)}件）" if len(invs) > 1 else "入金済として確定しました", "success")
-        return redirect(url)
+        try:
+            invs, _ = repo.confirm(_store(request), ids, transaction_id, note.strip(), user["id"], bool(register_alias))
+        except repo.ConfirmError as e:
+            flash(request, str(e), "error")
+        else:
+            flash(request, f"入金済として確定しました（{len(invs)}件）" if len(invs) > 1 else "入金済として確定しました", "success")
+        return redirect(f"/invoices/{invoice_id}")
 
     @app.post("/invoices/{invoice_id}/confirm-manual")
-    def confirm_manual(request: Request, invoice_id: int, note: str = Form(""), csrf: str = Form("")):
+    def confirm_manual(request: Request, invoice_id: str, note: str = Form(""), csrf: str = Form("")):
         user = current_user(request)
         require_csrf(request, csrf)
-        url = f"/invoices/{invoice_id}"
         if not note.strip():
             flash(request, "明細なしで確定する場合は理由（メモ）を入力してください", "error")
-            return redirect(url)
-        with db.transaction(request.app.state.db_path) as conn:
-            inv = conn.execute("SELECT * FROM invoices WHERE id = ?", (invoice_id,)).fetchone()
-            if not inv:
-                return redirect("/")
+        else:
             try:
-                conn.execute(
-                    "INSERT INTO matches (invoice_id, transaction_id, note, confirmed_by) VALUES (?, NULL, ?, ?)",
-                    (invoice_id, note.strip(), user["id"]),
-                )
-            except sqlite3.IntegrityError:
-                flash(request, "この請求書は既に消込済です", "error")
-                return redirect(url)
-            db.audit(conn, user["id"], "confirm_manual", f"請求書 {inv['invoice_no']}: {note.strip()}")
-        flash(request, "入金済として確定しました（明細なし）", "success")
-        return redirect(url)
+                repo.confirm_manual(_store(request), invoice_id, note.strip(), user["id"])
+            except repo.ConfirmError as e:
+                flash(request, str(e), "error")
+            else:
+                flash(request, "入金済として確定しました（明細なし）", "success")
+        return redirect(f"/invoices/{invoice_id}")
 
     @app.post("/invoices/{invoice_id}/unconfirm")
-    def unconfirm(request: Request, invoice_id: int, csrf: str = Form("")):
+    def unconfirm(request: Request, invoice_id: str, csrf: str = Form("")):
         user = current_user(request)
         require_csrf(request, csrf)
-        with db.transaction(request.app.state.db_path) as conn:
-            match = conn.execute("SELECT * FROM matches WHERE invoice_id = ?", (invoice_id,)).fetchone()
-            if not match:
-                return redirect(f"/invoices/{invoice_id}")
-            # まとめ入金は同じ入金に紐づく請求書をまとめて取り消す
-            if match["transaction_id"]:
-                where, param = "m.transaction_id = ?", match["transaction_id"]
-            else:
-                where, param = "m.invoice_id = ?", invoice_id
-            nos = [r[0] for r in conn.execute(
-                f"SELECT i.invoice_no FROM matches m JOIN invoices i ON i.id = m.invoice_id WHERE {where}", (param,)
-            )]
-            conn.execute(f"DELETE FROM matches WHERE id IN (SELECT m.id FROM matches m WHERE {where})", (param,))
-            db.audit(conn, user["id"], "unconfirm", f"請求書 {' + '.join(nos)}")
-        flash(request, f"確定を取り消しました（{', '.join(nos)}）", "success")
+        nos = repo.unconfirm(_store(request), invoice_id, user["id"])
+        if nos:
+            flash(request, f"確定を取り消しました（{', '.join(nos)}）", "success")
         return redirect(f"/invoices/{invoice_id}")
 
     # --- 入金明細 ---
@@ -415,23 +363,7 @@ def _register_routes(app: FastAPI) -> None:
     @app.get("/transactions")
     def transactions(request: Request, filter: str = "open", q: str = ""):
         user = current_user(request)
-        sql = (
-            "SELECT t.*, GROUP_CONCAT(i.id || ':' || i.invoice_no, ',') AS invoice_refs FROM transactions t "
-            "LEFT JOIN matches m ON m.transaction_id = t.id LEFT JOIN invoices i ON i.id = m.invoice_id "
-        )
-        where, params = [], []
-        if filter == "open":
-            where.append("m.id IS NULL")
-        elif filter == "matched":
-            where.append("m.id IS NOT NULL")
-        if q:
-            where.append("(t.payer_kana LIKE ? OR t.description LIKE ? OR CAST(t.amount AS TEXT) = ?)")
-            params += [f"%{q}%", f"%{q}%", q.replace(",", "")]
-        if where:
-            sql += "WHERE " + " AND ".join(where) + " "
-        sql += "GROUP BY t.id ORDER BY t.date DESC, t.id DESC LIMIT 500"
-        with _conn(request) as conn:
-            rows = conn.execute(sql, params).fetchall()
+        rows = repo.list_transactions(repo.load(_store(request)), filter, q.strip())
         return render(request, "transactions.html", user, rows=rows, filter=filter, q=q)
 
     # --- 取引先・振込名義の別名 ---
@@ -439,68 +371,67 @@ def _register_routes(app: FastAPI) -> None:
     @app.get("/clients")
     def clients(request: Request):
         user = current_user(request)
-        with _conn(request) as conn:
-            rows = conn.execute(
-                "SELECT c.*, (SELECT COUNT(*) FROM invoices i WHERE i.client_id = c.id) AS invoice_count, "
-                "(SELECT GROUP_CONCAT(alias, ' / ') FROM client_aliases a WHERE a.client_id = c.id) AS aliases "
-                "FROM clients c ORDER BY c.name"
-            ).fetchall()
+        snap = repo.load(_store(request))
+        counts: dict[str, int] = {}
+        for inv in snap.invoices:
+            counts[inv["client_id"]] = counts.get(inv["client_id"], 0) + 1
+        rows = sorted(
+            (
+                {**c, "invoice_count": counts.get(cid, 0),
+                 "aliases": " / ".join(a["alias"] for a in snap.aliases.get(cid, []))}
+                for cid, c in snap.clients.items()
+            ),
+            key=lambda c: c["name"],
+        )
         return render(request, "clients.html", user, rows=rows)
 
     @app.get("/clients/{client_id}")
-    def client_detail(request: Request, client_id: int):
+    def client_detail(request: Request, client_id: str):
         user = current_user(request)
-        with _conn(request) as conn:
-            client = conn.execute("SELECT * FROM clients WHERE id = ?", (client_id,)).fetchone()
-            if not client:
-                return render(request, "not_found.html", user, status_code=404)
-            aliases = conn.execute(
-                "SELECT * FROM client_aliases WHERE client_id = ? ORDER BY id", (client_id,)
-            ).fetchall()
-            invoices = conn.execute(
-                "SELECT i.*, m.id AS match_id FROM invoices i LEFT JOIN matches m ON m.invoice_id = i.id "
-                "WHERE i.client_id = ? ORDER BY i.issue_date DESC LIMIT 50",
-                (client_id,),
-            ).fetchall()
-        return render(request, "client.html", user, client=client, aliases=aliases, invoices=invoices)
+        snap = repo.load(_store(request))
+        client = snap.clients.get(client_id)
+        if not client:
+            return render(request, "not_found.html", user, status_code=404)
+        invoices = sorted(
+            ({**i, "match_id": i["id"] if i["id"] in snap.matches else None}
+             for i in snap.invoices if i["client_id"] == client_id),
+            key=lambda i: i.get("issue_date") or "", reverse=True,
+        )[:50]
+        return render(
+            request, "client.html", user,
+            client=client, aliases=snap.aliases.get(client_id, []), invoices=invoices,
+        )
 
     @app.post("/clients/{client_id}/kana")
-    def client_kana(request: Request, client_id: int, name_kana: str = Form(""), csrf: str = Form("")):
+    def client_kana(request: Request, client_id: str, name_kana: str = Form(""), csrf: str = Form("")):
         user = current_user(request)
         require_csrf(request, csrf)
-        with db.transaction(request.app.state.db_path) as conn:
-            conn.execute("UPDATE clients SET name_kana = ? WHERE id = ?", (name_kana.strip(), client_id))
-            db.audit(conn, user["id"], "client_kana", f"取引先#{client_id}: {name_kana.strip()}")
+        repo.set_client_kana(_store(request), client_id, name_kana.strip())
+        repo.audit(_store(request), user["id"], "client_kana", f"取引先 {client_id}: {name_kana.strip()}")
         flash(request, "カナ名を更新しました", "success")
         return redirect(f"/clients/{client_id}")
 
     @app.post("/clients/{client_id}/aliases")
-    def add_alias(request: Request, client_id: int, alias: str = Form(...), csrf: str = Form("")):
+    def add_alias(request: Request, client_id: str, alias: str = Form(...), csrf: str = Form("")):
         user = current_user(request)
         require_csrf(request, csrf)
         alias = alias.strip()
         if not kana.normalize(alias):
             flash(request, "別名を入力してください", "error")
-            return redirect(f"/clients/{client_id}")
-        with db.transaction(request.app.state.db_path) as conn:
-            if _add_alias(conn, client_id, alias):
-                db.audit(conn, user["id"], "alias_add", f"取引先#{client_id}: {alias}")
-                flash(request, f"別名「{alias}」を登録しました", "success")
-            else:
-                flash(request, "同じ別名が既に登録されています", "warn")
+        elif repo.add_alias(_store(request), client_id, alias):
+            repo.audit(_store(request), user["id"], "alias_add", f"取引先 {client_id}: {alias}")
+            flash(request, f"別名「{alias}」を登録しました", "success")
+        else:
+            flash(request, "同じ別名が既に登録されています", "warn")
         return redirect(f"/clients/{client_id}")
 
     @app.post("/clients/{client_id}/aliases/{alias_id}/delete")
-    def delete_alias(request: Request, client_id: int, alias_id: int, csrf: str = Form("")):
+    def delete_alias(request: Request, client_id: str, alias_id: str, csrf: str = Form("")):
         user = current_user(request)
         require_csrf(request, csrf)
-        with db.transaction(request.app.state.db_path) as conn:
-            row = conn.execute(
-                "SELECT * FROM client_aliases WHERE id = ? AND client_id = ?", (alias_id, client_id)
-            ).fetchone()
-            if row:
-                conn.execute("DELETE FROM client_aliases WHERE id = ?", (alias_id,))
-                db.audit(conn, user["id"], "alias_delete", f"取引先#{client_id}: {row['alias']}")
+        doc = repo.delete_alias(_store(request), client_id, alias_id)
+        if doc:
+            repo.audit(_store(request), user["id"], "alias_delete", f"取引先 {client_id}: {doc['alias']}")
         flash(request, "別名を削除しました", "success")
         return redirect(f"/clients/{client_id}")
 
@@ -509,34 +440,27 @@ def _register_routes(app: FastAPI) -> None:
     @app.get("/users")
     def users(request: Request):
         user = current_user(request)
-        with _conn(request) as conn:
-            rows = conn.execute("SELECT id, username, created_at FROM users ORDER BY id").fetchall()
-            logs = conn.execute(
-                "SELECT l.*, u.username FROM audit_log l LEFT JOIN users u ON u.id = l.user_id "
-                "ORDER BY l.id DESC LIMIT 100"
-            ).fetchall()
+        store = _store(request)
+        rows = repo.list_users(store)
+        names = {u["id"]: u["username"] for u in rows}
+        logs = [{**l, "username": names.get(l.get("user_id"), "")} for l in repo.latest(store, "audit_log", 100)]
         return render(request, "users.html", user, rows=rows, logs=logs)
 
     @app.post("/users")
     def create_user(request: Request, username: str = Form(...), password: str = Form(...), csrf: str = Form("")):
         user = current_user(request)
         require_csrf(request, csrf)
+        if config.AUTH != "password":
+            return redirect("/users")
         username = username.strip()
         err = auth.validate_new_password(password) or (None if username else "ユーザー名を入力してください")
         if err:
             flash(request, err, "error")
-            return redirect("/users")
-        with db.transaction(request.app.state.db_path) as conn:
-            try:
-                conn.execute(
-                    "INSERT INTO users (username, password_hash) VALUES (?, ?)",
-                    (username, auth.hash_password(password)),
-                )
-            except sqlite3.IntegrityError:
-                flash(request, "そのユーザー名は既に使われています", "error")
-                return redirect("/users")
-            db.audit(conn, user["id"], "user_create", username)
-        flash(request, f"ユーザー「{username}」を作成しました", "success")
+        elif not repo.create_user(_store(request), username, auth.hash_password(password)):
+            flash(request, "そのユーザー名は既に使われています", "error")
+        else:
+            repo.audit(_store(request), user["id"], "user_create", username)
+            flash(request, f"ユーザー「{username}」を作成しました", "success")
         return redirect("/users")
 
     @app.post("/account/password")
@@ -548,24 +472,20 @@ def _register_routes(app: FastAPI) -> None:
     ):
         user = current_user(request)
         require_csrf(request, csrf)
-        with db.transaction(request.app.state.db_path) as conn:
-            row = conn.execute("SELECT password_hash FROM users WHERE id = ?", (user["id"],)).fetchone()
-            if not auth.verify_password(current_password, row["password_hash"]):
-                flash(request, "現在のパスワードが違います", "error")
-                return redirect("/users")
-            err = auth.validate_new_password(new_password)
-            if err:
-                flash(request, err, "error")
-                return redirect("/users")
-            conn.execute(
-                "UPDATE users SET password_hash = ? WHERE id = ?", (auth.hash_password(new_password), user["id"])
-            )
-            db.audit(conn, user["id"], "password_change")
-        flash(request, "パスワードを変更しました", "success")
+        if config.AUTH != "password":
+            return redirect("/users")
+        if not user.get("password_hash") or not auth.verify_password(current_password, user["password_hash"]):
+            flash(request, "現在のパスワードが違います", "error")
+        elif err := auth.validate_new_password(new_password):
+            flash(request, err, "error")
+        else:
+            repo.set_password(_store(request), user["id"], auth.hash_password(new_password))
+            repo.audit(_store(request), user["id"], "password_change")
+            flash(request, "パスワードを変更しました", "success")
         return redirect("/users")
 
 
-async def _import_file(request: Request, user: sqlite3.Row, kind: str, file: UploadFile) -> None:
+async def _import_file(request: Request, user: dict, kind: str, file: UploadFile) -> None:
     data = await file.read(MAX_UPLOAD_BYTES + 1)
     if len(data) > MAX_UPLOAD_BYTES:
         flash(request, f"{file.filename}: ファイルが大きすぎます（10MBまで）", "error")
@@ -576,38 +496,14 @@ async def _import_file(request: Request, user: sqlite3.Row, kind: str, file: Upl
         flash(request, f"{file.filename}: {e}", "error")
         return
 
-    with db.transaction(request.app.state.db_path) as conn:
-        if kind == "invoy":
-            added, updated, skipped = import_invoices(conn, parsed)
-            msg = f"請求書 新規{added}件・更新{updated}件・確定済のためスキップ{skipped}件"
-        else:
-            added, skipped = import_transactions(conn, parsed)
-            msg = f"{IMPORT_KINDS[kind]} 入金 新規{added}件・取込済のためスキップ{skipped}件"
-        skipped += parsed.skipped
-        conn.execute(
-            "INSERT INTO imports (kind, filename, added, skipped, imported_by) VALUES (?, ?, ?, ?, ?)",
-            (kind, file.filename or "", added, skipped, user["id"]),
-        )
-        db.audit(conn, user["id"], "import", f"{kind} {file.filename}: {msg}")
+    store = _store(request)
+    if kind == "invoy":
+        added, updated, skipped = repo.import_invoices(store, parsed)
+        msg = f"請求書 新規{added}件・更新{updated}件・確定済のためスキップ{skipped}件"
+    else:
+        added, skipped = repo.import_transactions(store, parsed)
+        msg = f"{IMPORT_KINDS[kind]} 入金 新規{added}件・取込済のためスキップ{skipped}件"
+    repo.record_import(store, user["id"], kind, file.filename or "", added, skipped + parsed.skipped, msg)
     flash(request, f"{file.filename}: {msg}（対象外の行 {parsed.skipped}件）", "success")
     for w in parsed.warnings[:20]:
         flash(request, f"{file.filename} {w}", "warn")
-
-
-def _add_alias(conn: sqlite3.Connection, client_id: int, alias: str) -> bool:
-    cur = conn.execute(
-        "INSERT OR IGNORE INTO client_aliases (client_id, alias, alias_norm) VALUES (?, ?, ?)",
-        (client_id, alias, kana.normalize(alias)),
-    )
-    return cur.rowcount > 0
-
-
-def _search_open_transactions(conn: sqlite3.Connection, q: str) -> list[sqlite3.Row]:
-    amount = q.replace(",", "").strip()
-    return conn.execute(
-        "SELECT t.* FROM transactions t LEFT JOIN matches m ON m.transaction_id = t.id "
-        "WHERE m.id IS NULL AND (t.payer_kana LIKE ? OR t.description LIKE ? OR CAST(t.amount AS TEXT) = ?) "
-        "ORDER BY t.date DESC LIMIT 50",
-        (f"%{q}%", f"%{q}%", amount),
-    ).fetchall()
-

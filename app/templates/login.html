@@ -4,6 +4,14 @@
 <div class="login-box">
   <h1>入金消込</h1>
   {% if error %}<div class="flash flash-error">{{ error }}</div>{% endif %}
+  {% if auth_mode == "google" %}
+    {% if google_ready %}
+    <a class="button primary google" href="/auth/google?next={{ next|urlencode }}">Google アカウントでログイン</a>
+    {% if allowed_domain %}<p class="muted small">{{ allowed_domain }} のアカウントでログインしてください。</p>{% endif %}
+    {% else %}
+    <p class="flash flash-warn">Google ログインが未設定です（GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET を設定してください）。</p>
+    {% endif %}
+  {% else %}
   <form method="post" action="/login">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <input type="hidden" name="next" value="{{ next }}">
@@ -11,5 +19,6 @@
     <label>パスワード<input name="password" type="password" autocomplete="current-password" required></label>
     <button type="submit" class="primary">ログイン</button>
   </form>
+  {% endif %}
 </div>
 {% endblock %}

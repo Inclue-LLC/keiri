@@ -1,26 +1,24 @@
 from datetime import date
 
-from app import csv_import, db, matching
-from app.main import import_invoices, import_transactions
-from tests.conftest import SAMPLES
+from app import csv_import, matching, repo
+from tests.conftest import SAMPLES, add_client, add_invoice, add_tx
 
 TODAY = date(2026, 10, 18)
 
 
-def _load_samples(conn):
-    import_invoices(conn, csv_import.parse_invoy((SAMPLES / "invoy_invoices.csv").read_bytes()))
-    import_transactions(conn, csv_import.parse_bank((SAMPLES / "smbc_statement.csv").read_bytes(), "smbc"))
-    import_transactions(conn, csv_import.parse_bank((SAMPLES / "gmo_aozora_statement.csv").read_bytes(), "gmo"))
+def _load_samples(store):
+    repo.import_invoices(store, csv_import.parse_invoy((SAMPLES / "invoy_invoices.csv").read_bytes()))
+    repo.import_transactions(store, csv_import.parse_bank((SAMPLES / "smbc_statement.csv").read_bytes(), "smbc"))
+    repo.import_transactions(store, csv_import.parse_bank((SAMPLES / "gmo_aozora_statement.csv").read_bytes(), "gmo"))
 
 
-def _views(conn):
-    return {v.invoice["invoice_no"]: v for v in matching.build_views(conn, today=TODAY)}
+def _views(store):
+    return {v.invoice["invoice_no"]: v for v in matching.build_views(repo.load(store), today=TODAY)}
 
 
-def test_statuses_from_samples(db_path):
-    with db.transaction(db_path) as conn:
-        _load_samples(conn)
-        views = _views(conn)
+def test_statuses_from_samples(store):
+    _load_samples(store)
+    views = _views(store)
 
     # 金額一致・日付妥当だが名義が未登録 → 要確認
     v = views["20260901-1"]
@@ -39,95 +37,61 @@ def test_statuses_from_samples(db_path):
     assert views["20261001-1"].status == matching.STATUS_UNPAID
 
 
-def test_alias_raises_name_score(db_path):
-    with db.transaction(db_path) as conn:
-        _load_samples(conn)
-        client_id = conn.execute("SELECT id FROM clients WHERE name = '株式会社山田商事'").fetchone()[0]
-        before = _views(conn)["20260901-1"].candidates[0].score
-        conn.execute(
-            "INSERT INTO client_aliases (client_id, alias, alias_norm) VALUES (?, 'ｶ)ﾔﾏﾀﾞｼﾖｳｼﾞ', 'ヤマダシヨウジ')",
-            (client_id,),
-        )
-        cand = _views(conn)["20260901-1"].candidates[0]
+def test_alias_raises_name_score(store):
+    _load_samples(store)
+    before = _views(store)["20260901-1"].candidates[0].score
+    repo.add_alias(store, repo.client_id_for("株式会社山田商事"), "ｶ)ﾔﾏﾀﾞｼﾖｳｼﾞ")
+    cand = _views(store)["20260901-1"].candidates[0]
     assert cand.score > before
     assert cand.name_score == 1.0
 
 
-def test_confirmed_match_is_paid_and_tx_not_reused(db_path):
-    with db.transaction(db_path) as conn:
-        _load_samples(conn)
-        conn.execute("INSERT INTO users (username, password_hash) VALUES ('u', 'x')")
-        inv = conn.execute("SELECT id FROM invoices WHERE invoice_no = '20260901-1'").fetchone()[0]
-        tx = conn.execute("SELECT id FROM transactions WHERE amount = 110000").fetchone()[0]
-        conn.execute("INSERT INTO matches (invoice_id, transaction_id, confirmed_by) VALUES (?, ?, 1)", (inv, tx))
-        # 同額の別請求書を追加しても、確定済みの入金は候補に出ない
-        conn.execute(
-            "INSERT INTO invoices (invoice_no, client_id, issue_date, due_date, amount) "
-            "SELECT 'X-1', client_id, issue_date, due_date, amount FROM invoices WHERE id = ?",
-            (inv,),
-        )
-        views = _views(conn)
+def test_confirmed_match_is_paid_and_tx_not_reused(store):
+    _load_samples(store)
+    inv = repo.invoice_id_for("20260901-1")
+    tx = next(t for t in store.all("transactions") if t["amount"] == 110000)
+    repo.confirm(store, [inv], tx["id"], "", "u", False)
+    # 同額の別請求書を追加しても、確定済みの入金は候補に出ない
+    add_invoice(store, "X-1", repo.client_id_for("株式会社山田商事"), "2026-09-01", "2026-09-30", 110000)
+    views = _views(store)
     assert views["20260901-1"].status == matching.STATUS_PAID
     assert views["X-1"].candidates == []
     assert views["X-1"].status == matching.STATUS_OVERDUE
 
 
-def test_fee_candidate_requires_name_similarity(db_path):
+def test_fee_candidate_requires_name_similarity(store):
     """差額ありで名義も合わない入金は日付が合っても候補にしない（ノイズ防止）。"""
-    with db.transaction(db_path) as conn:
-        conn.execute("INSERT INTO clients (id, name) VALUES (1, '株式会社サンプル')")
-        conn.execute(
-            "INSERT INTO invoices (invoice_no, client_id, issue_date, due_date, amount) "
-            "VALUES ('S-1', 1, '2026-10-01', '2026-10-31', 10000)"
-        )
-        conn.execute(
-            "INSERT INTO transactions (bank, date, amount, description, payer_kana, dedupe_key) "
-            "VALUES ('smbc', '2026-10-10', 9560, '振込 ﾍﾞﾂｶｲｼﾔ', 'ベツカイシヤ', 'k1')"
-        )
-        assert _views(conn)["S-1"].candidates == []
-        conn.execute("UPDATE transactions SET payer_kana = 'カ)サンプル'")
-        assert _views(conn)["S-1"].candidates[0].amount_diff == 440
+    cid = add_client(store, "株式会社サンプル")
+    add_invoice(store, "S-1", cid, "2026-10-01", "2026-10-31", 10000)
+    tid = add_tx(store, "2026-10-10", 9560, "ベツカイシヤ")
+    assert _views(store)["S-1"].candidates == []
+    store.update("transactions", tid, {"payer_kana": "カ)サンプル"})
+    assert _views(store)["S-1"].candidates[0].amount_diff == 440
 
 
-def test_fee_over_tolerance_not_candidate(db_path):
-    with db.transaction(db_path) as conn:
-        conn.execute("INSERT INTO clients (id, name, name_kana) VALUES (1, 'X', 'サンプル')")
-        conn.execute(
-            "INSERT INTO invoices (invoice_no, client_id, issue_date, due_date, amount) "
-            "VALUES ('S-1', 1, '2026-10-01', '2026-10-31', 10000)"
-        )
-        conn.execute(
-            "INSERT INTO transactions (bank, date, amount, description, payer_kana, dedupe_key) "
-            "VALUES ('smbc', '2026-10-10', 9000, '', 'サンプル', 'k1')"
-        )
-        assert _views(conn)["S-1"].candidates == []
+def test_fee_over_tolerance_not_candidate(store):
+    cid = add_client(store, "X", kana="サンプル")
+    add_invoice(store, "S-1", cid, "2026-10-01", "2026-10-31", 10000)
+    add_tx(store, "2026-10-10", 9000, "サンプル")
+    assert _views(store)["S-1"].candidates == []
 
 
-def _setup_client(conn, invoices, txs, alias="カ)サンプル"):
-    conn.execute("INSERT INTO clients (id, name) VALUES (1, '株式会社サンプル')")
-    conn.execute("INSERT INTO client_aliases (client_id, alias, alias_norm) VALUES (1, ?, 'サンプル')", (alias,))
+def _setup_client(store, invoices, txs):
+    cid = add_client(store, "株式会社サンプル", aliases=["カ)サンプル"])
     for no, issue, due, amount in invoices:
-        conn.execute(
-            "INSERT INTO invoices (invoice_no, client_id, issue_date, due_date, amount) VALUES (?, 1, ?, ?, ?)",
-            (no, issue, due, amount),
-        )
-    for n, (d, amount, payer) in enumerate(txs):
-        conn.execute(
-            "INSERT INTO transactions (bank, date, amount, description, payer_kana, dedupe_key) "
-            "VALUES ('smbc', ?, ?, '', ?, ?)",
-            (d, amount, payer, f"k{n}"),
-        )
+        add_invoice(store, no, cid, issue, due, amount)
+    for d, amount, payer in txs:
+        add_tx(store, d, amount, payer)
 
 
-def test_combined_payment_candidate(db_path):
-    with db.transaction(db_path) as conn:
-        _setup_client(
-            conn,
-            [("A", "2026-03-09", "2026-04-30", 440000), ("B", "2026-05-02", "2026-05-31", 165000),
-             ("C", "2026-05-10", "2026-06-30", 50000)],
-            [("2026-05-29", 605000, "カ)サンプル")],
-        )
-        views = _views(conn)
+def test_combined_payment_candidate(store):
+    _setup_client(
+        store,
+        [("A", "2026-03-09", "2026-04-30", 440000), ("B", "2026-05-02", "2026-05-31", 165000),
+         ("C", "2026-05-10", "2026-06-30", 50000)],
+        [("2026-05-29", 605000, "カ)サンプル")],
+    )
+    views = _views(store)
     for no in ("A", "B"):
         c = views[no].candidates[0]
         assert c.is_combined
@@ -137,29 +101,26 @@ def test_combined_payment_candidate(db_path):
     assert views["C"].candidates == []
 
 
-def test_combined_payment_requires_name(db_path):
-    with db.transaction(db_path) as conn:
-        _setup_client(
-            conn,
-            [("A", "2026-03-09", "2026-04-30", 440000), ("B", "2026-05-02", "2026-05-31", 165000)],
-            [("2026-05-29", 605000, "ベツノカイシヤ")],
-        )
-        assert _views(conn)["A"].candidates == []
+def test_combined_payment_requires_name(store):
+    _setup_client(
+        store,
+        [("A", "2026-03-09", "2026-04-30", 440000), ("B", "2026-05-02", "2026-05-31", 165000)],
+        [("2026-05-29", 605000, "ベツノカイシヤ")],
+    )
+    assert _views(store)["A"].candidates == []
 
 
-def test_same_amount_prefers_deposit_near_due(db_path):
-    with db.transaction(db_path) as conn:
-        _setup_client(
-            conn,
-            [("APR", "2026-04-08", "2026-04-30", 165000), ("MAY", "2026-05-02", "2026-05-31", 165000)],
-            [("2026-04-30", 165000, "カ)サンプル"), ("2026-05-29", 165000, "カ)サンプル")],
-        )
-        views = _views(conn)
+def test_same_amount_prefers_deposit_near_due(store):
+    _setup_client(
+        store,
+        [("APR", "2026-04-08", "2026-04-30", 165000), ("MAY", "2026-05-02", "2026-05-31", 165000)],
+        [("2026-04-30", 165000, "カ)サンプル"), ("2026-05-29", 165000, "カ)サンプル")],
+    )
+    views = _views(store)
     assert views["APR"].candidates[0].transaction["date"] == "2026-04-30"
     assert views["MAY"].candidates[0].transaction["date"] == "2026-05-29"
 
 
-def test_fee_candidate_requires_date(db_path):
-    with db.transaction(db_path) as conn:
-        _setup_client(conn, [("A", "2026-06-06", "2026-07-31", 34656)], [("2026-03-31", 34289, "カ)サンプル")])
-        assert _views(conn)["A"].candidates == []
+def test_fee_candidate_requires_date(store):
+    _setup_client(store, [("A", "2026-06-06", "2026-07-31", 34656)], [("2026-03-31", 34289, "カ)サンプル")])
+    assert _views(store)["A"].candidates == []
