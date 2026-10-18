@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}ユーザー{% endblock %}
+{% block content %}
+<h1>ユーザー</h1>
+<div class="cols">
+<section class="card">
+  <h2>ユーザー一覧</h2>
+  <ul>{% for u in rows %}<li>{{ u.username }} <span class="muted small">{{ u.created_at }}</span></li>{% endfor %}</ul>
+  <h3>ユーザーを追加</h3>
+  <form method="post" action="/users" class="stack">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input name="username" placeholder="ユーザー名" required autocomplete="off">
+    <input name="password" type="password" placeholder="初期パスワード（10文字以上）" required autocomplete="new-password">
+    <button type="submit">追加</button>
+  </form>
+</section>
+<section class="card">
+  <h2>パスワード変更</h2>
+  <form method="post" action="/account/password" class="stack">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input name="current_password" type="password" placeholder="現在のパスワード" required autocomplete="current-password">
+    <input name="new_password" type="password" placeholder="新しいパスワード（10文字以上）" required autocomplete="new-password">
+    <button type="submit">変更</button>
+  </form>
+</section>
+</div>
+
+<h2>操作履歴</h2>
+<div class="table-wrap">
+<table>
+  <thead><tr><th>日時</th><th>ユーザー</th><th>操作</th><th>内容</th></tr></thead>
+  <tbody>
+  {% for l in logs %}
+    <tr><td>{{ l.created_at }}</td><td>{{ l.username or "（CLI）" }}</td><td>{{ l.action }}</td><td>{{ l.detail }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}

@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}ログイン{% endblock %}
+{% block content %}
+<div class="login-box">
+  <h1>入金消込</h1>
+  {% if error %}<div class="flash flash-error">{{ error }}</div>{% endif %}
+  <form method="post" action="/login">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="next" value="{{ next }}">
+    <label>ユーザー名<input name="username" autocomplete="username" required autofocus></label>
+    <label>パスワード<input name="password" type="password" autocomplete="current-password" required></label>
+    <button type="submit" class="primary">ログイン</button>
+  </form>
+</div>
+{% endblock %}

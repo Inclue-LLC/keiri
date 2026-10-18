@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}{{ client.name }}{% endblock %}
+{% block content %}
+<p><a href="/clients">&larr; 取引先一覧へ</a></p>
+<h1>{{ client.name }}</h1>
+
+<section class="card">
+  <h2>カナ名</h2>
+  <form method="post" action="/clients/{{ client.id }}/kana" class="inline">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input name="name_kana" value="{{ client.name_kana }}" placeholder="例: カ)ヤマダシヨウジ">
+    <button type="submit">保存</button>
+  </form>
+</section>
+
+<section class="card">
+  <h2>振込名義の別名</h2>
+  {% if aliases %}
+  <ul class="aliases">
+    {% for a in aliases %}
+    <li>
+      {{ a.alias }}
+      <form method="post" action="/clients/{{ client.id }}/aliases/{{ a.id }}/delete" class="inline">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button type="submit" class="link danger-text">削除</button>
+      </form>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}<p class="empty">別名は登録されていません。</p>{% endif %}
+  <form method="post" action="/clients/{{ client.id }}/aliases" class="inline">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input name="alias" placeholder="例: ヤマダホールディングス" required>
+    <button type="submit" class="primary">別名を追加</button>
+  </form>
+  <p class="muted small">半角・全角、法人略語（カ）・(カ など）、小さい「ャ」「ッ」などの違いは自動で吸収して照合します。</p>
+</section>
+
+<h2>請求書</h2>
+{% if invoices %}
+<div class="table-wrap">
+<table>
+  <thead><tr><th>請求書番号</th><th>請求日</th><th>支払期限</th><th class="num">請求額</th><th></th></tr></thead>
+  <tbody>
+  {% for i in invoices %}
+    <tr><td><a href="/invoices/{{ i.id }}">{{ i.invoice_no }}</a></td><td>{{ i.issue_date or "" }}</td>
+      <td>{{ i.due_date or "" }}</td><td class="num">{{ i.amount|yen }}</td>
+      <td>{% if i.match_id %}<span class="badge badge-paid">入金済</span>{% endif %}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+{% endblock %}

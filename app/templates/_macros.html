@@ -1,0 +1,8 @@
+{% macro status_badge(status) -%}
+{%- set cls = {"入金済": "paid", "要確認": "review", "未入金": "unpaid", "期日超過": "overdue"}[status] -%}
+<span class="badge badge-{{ cls }}">{{ status }}</span>
+{%- endmacro %}
+
+{% macro reasons(cand) -%}
+{% for label, kind in cand.reasons %}<span class="chip chip-{{ kind }}">{{ label }}</span>{% endfor %}
+{%- endmacro %}

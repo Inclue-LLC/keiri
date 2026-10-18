@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% from "_macros.html" import status_badge %}
+{% block title %}請求書{% endblock %}
+{% block content %}
+<div class="summary">
+  <a class="tile {% if not status %}active{% endif %}" href="/?q={{ q|urlencode }}">
+    <span class="tile-label">すべて</span><span class="tile-num">{{ counts.values()|sum }}</span>
+  </a>
+  {% for s in statuses %}
+  <a class="tile tile-{{ loop.index }} {% if status == s %}active{% endif %}" href="/?status={{ s|urlencode }}&q={{ q|urlencode }}">
+    <span class="tile-label">{{ s }}</span><span class="tile-num">{{ counts[s] }}</span>
+  </a>
+  {% endfor %}
+</div>
+
+<form class="search" method="get" action="/">
+  <input type="hidden" name="status" value="{{ status }}">
+  <input name="q" value="{{ q }}" placeholder="請求書番号・取引先・件名で検索">
+  <button type="submit">検索</button>
+</form>
+
+{% if not views %}
+<p class="empty">該当する請求書はありません。{% if not counts.values()|sum %}<a href="/upload">INVOY の請求書 CSV を取り込んでください。</a>{% endif %}</p>
+{% else %}
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr><th>ステータス</th><th>請求書番号</th><th>取引先</th><th>件名</th><th>請求日</th><th>支払期限</th><th class="num">請求額</th><th>候補・消込</th></tr>
+  </thead>
+  <tbody>
+  {% for v in views %}
+    <tr>
+      <td>{{ status_badge(v.status) }}</td>
+      <td><a href="/invoices/{{ v.invoice.id }}">{{ v.invoice.invoice_no }}</a></td>
+      <td>{{ v.invoice.client_name }}</td>
+      <td class="clip">{{ v.invoice.subject }}</td>
+      <td>{{ v.invoice.issue_date or "" }}</td>
+      <td>{{ v.invoice.due_date or "" }}</td>
+      <td class="num">{{ v.invoice.amount|yen }}</td>
+      <td>
+        {% if v.match %}
+          <span class="muted">確定 {{ v.match.confirmed_at[:10] }}{% if v.match.fee_diff %}・手数料 {{ v.match.fee_diff|yen }}円{% endif %}</span>
+        {% elif v.candidates %}
+          {% set c = v.candidates[0] %}
+          <a href="/invoices/{{ v.invoice.id }}">{{ c.transaction.date }} {{ c.transaction.payer_kana }}</a>
+          {% if c.fee_suspected %}<span class="chip chip-warn">手数料差引の可能性あり</span>{% endif %}
+          {% if v.candidates|length > 1 %}<span class="muted">他{{ v.candidates|length - 1 }}件</span>{% endif %}
+        {% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}取引先・別名{% endblock %}
+{% block content %}
+<h1>取引先・振込名義の別名</h1>
+<p class="muted small">取引先は INVOY の請求書 CSV から自動で登録されます。振込名義が会社名と異なる取引先（親会社・経理代行・個人名義など）は別名を登録すると照合されるようになります。</p>
+{% if rows %}
+<div class="table-wrap">
+<table>
+  <thead><tr><th>取引先</th><th>カナ名</th><th>振込名義の別名</th><th class="num">請求書</th></tr></thead>
+  <tbody>
+  {% for c in rows %}
+    <tr>
+      <td><a href="/clients/{{ c.id }}">{{ c.name }}</a></td>
+      <td>{{ c.name_kana or "" }}</td>
+      <td>{{ c.aliases or "" }}</td>
+      <td class="num">{{ c.invoice_count }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% else %}<p class="empty">取引先はまだありません。</p>{% endif %}
+{% endblock %}

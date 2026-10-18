@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}入金明細{% endblock %}
+{% block content %}
+<h1>入金明細</h1>
+<form class="search" method="get" action="/transactions">
+  <select name="filter">
+    <option value="open" {% if filter == "open" %}selected{% endif %}>未消込</option>
+    <option value="matched" {% if filter == "matched" %}selected{% endif %}>消込済</option>
+    <option value="all" {% if filter == "all" %}selected{% endif %}>すべて</option>
+  </select>
+  <input name="q" value="{{ q }}" placeholder="振込名義（カナ）または金額">
+  <button type="submit">表示</button>
+</form>
+{% if rows %}
+<div class="table-wrap">
+<table>
+  <thead><tr><th>入金日</th><th>銀行</th><th>振込名義</th><th>摘要</th><th class="num">入金額</th><th>消込先</th></tr></thead>
+  <tbody>
+  {% for t in rows %}
+    <tr>
+      <td>{{ t.date }}</td><td>{{ bank_names[t.bank] }}</td><td>{{ t.payer_kana }}</td>
+      <td class="muted clip">{{ t.description }}</td><td class="num">{{ t.amount|yen }}</td>
+      <td>{% if t.invoice_id %}<a href="/invoices/{{ t.invoice_id }}">{{ t.invoice_no }}</a>{% else %}<span class="muted">未消込</span>{% endif %}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% if rows|length == 500 %}<p class="muted small">最新500件を表示しています。</p>{% endif %}
+{% else %}<p class="empty">該当する入金はありません。</p>{% endif %}
+{% endblock %}
